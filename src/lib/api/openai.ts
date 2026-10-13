@@ -1,3 +1,18 @@
+/** Provides validated OpenAI-compatible chat completion and streaming operations.
+ *
+ * Provider payloads are validated at the HTTP boundary and normalized into application-facing types. HTTP, transport, response, and stream-processing failures are reported with typed errors.
+ *
+ * @example
+ * ```ts
+ * import { type OpenAiCredentials, type OpenAiMessageRequest, streamOpenAiChat } from '$lib/api';
+ *
+ * const messages: OpenAiMessageRequest[] = [{ role: 'user', content: 'Hello!' }];
+ * for await (const chunk of streamOpenAiChat(credentials, messages)) {
+ * 	if (chunk.content !== undefined) console.log(chunk.content);
+ * }
+ * ```
+ */
+
 import * as v from 'valibot';
 
 import { AppError } from '#lib/error';
@@ -27,12 +42,20 @@ export const OpenAiMessageSchema = v.object({
 /** Request body sent to an OpenAI-compatible chat completion endpoint. */
 export const OpenAiChatCompletionRequestSchema = v.object({
 	model: v.optional(v.pipe(v.string(), v.minLength(1))),
-	messages: v.array(OpenAiMessageRequestSchema)
+	messages: v.array(OpenAiMessageRequestSchema),
+	stream: v.boolean()
 });
 
 /** Complete normalized response returned by a chat completion call. */
 export const OpenAiChatCompletionResultSchema = v.object({
 	message: OpenAiMessageSchema,
+	finishReason: v.optional(v.string())
+});
+
+/** Normalized content, reasoning, or completion-ending delta from a stream. */
+export const OpenAiChatCompletionChunkSchema = v.object({
+	content: v.optional(v.string()),
+	reasoning: v.optional(v.string()),
 	finishReason: v.optional(v.string())
 });
 
@@ -55,6 +78,19 @@ const OpenAiCompletionResponseSchema = v.object({
 	)
 });
 
+const OpenAiStreamResponseSchema = v.object({
+	choices: v.array(
+		v.object({
+			delta: v.object({
+				content: v.optional(v.nullable(v.string())),
+				reasoning: v.optional(v.nullable(v.string())),
+				reasoning_content: v.optional(v.nullable(v.string()))
+			}),
+			finish_reason: v.optional(v.nullable(v.string()))
+		})
+	)
+});
+
 /** Role accepted by an OpenAI-compatible chat completion message. */
 export type OpenAiMessageRole = v.InferOutput<typeof OpenAiMessageRoleSchema>;
 /** Request message sent to an OpenAI-compatible chat completion endpoint. */
@@ -63,6 +99,8 @@ export type OpenAiMessageRequest = v.InferOutput<typeof OpenAiMessageRequestSche
 export type OpenAiChatCompletionRequest = v.InferOutput<typeof OpenAiChatCompletionRequestSchema>;
 /** Complete normalized response returned by a chat completion call. */
 export type OpenAiChatCompletionResult = v.InferOutput<typeof OpenAiChatCompletionResultSchema>;
+/** Normalized delta yielded by a streaming completion call. */
+export type OpenAiChatCompletionChunk = v.InferOutput<typeof OpenAiChatCompletionChunkSchema>;
 
 /** Credentials and endpoint used for an OpenAI-compatible completion request. */
 export type OpenAiCredentials = Pick<ProviderConfig, 'endpoint'> &
@@ -113,6 +151,24 @@ export class OpenAiResponseError extends AppError {
 	}
 }
 
+/** Represents an unexpected failure while consuming a completion stream. */
+export class OpenAiStreamError extends AppError {
+	readonly kind = 'openai_stream';
+
+	/** Creates an OpenAI-compatible stream error. */
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+	}
+}
+
+/**
+ * Requests and normalizes a non-streaming chat completion.
+ *
+ * @param credentials - The endpoint and optional provider credentials.
+ * @param messages - The conversation messages to send.
+ * @returns The normalized assistant response.
+ * @throws {ValiError|OpenAiApiError|OpenAiNetworkError|OpenAiTimeoutError|OpenAiResponseError} when validation or the request fails.
+ */
 export async function completeOpenAiChat(
 	credentials: OpenAiCredentials,
 	messages: OpenAiMessageRequest[]
@@ -122,20 +178,7 @@ export async function completeOpenAiChat(
 		messageCount: messages.length
 	});
 
-	const body = createOpenAiChatCompletionRequest(credentials, messages);
-	const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	let response: Response;
-	try {
-		response = await fetchCompletion(credentials, body, signal);
-	} catch (cause: unknown) {
-		throwTransportError(cause, signal);
-	}
-
-	if (!response.ok) {
-		const error = await apiError(response);
-		log.error('completion request failed', { err: error });
-		throw error;
-	}
+	const { response, signal } = await requestCompletion(credentials, messages, false);
 
 	let payload: unknown;
 	try {
@@ -160,14 +203,126 @@ export async function completeOpenAiChat(
 	return toCompletionResult(parsed.output);
 }
 
+/**
+ * Streams normalized deltas from an OpenAI-compatible chat completion.
+ *
+ * @param credentials - The endpoint and optional provider credentials.
+ * @param messages - The conversation messages to send.
+ * @yields {OpenAiChatCompletionChunk} A content, reasoning, or finish-reason delta.
+ * @throws {OpenAiApiError|OpenAiNetworkError|OpenAiTimeoutError|OpenAiResponseError|OpenAiStreamError} when the request or stream fails.
+ */
+export async function* streamOpenAiChat(
+	credentials: OpenAiCredentials,
+	messages: OpenAiMessageRequest[]
+): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
+	log.trace('completion stream enter', {
+		model: credentials.model,
+		messageCount: messages.length
+	});
+
+	const { response, signal } = await requestCompletion(credentials, messages, true);
+	if (response.body === null) {
+		const error = new OpenAiResponseError('OpenAI returned no streaming response body');
+		log.error('completion stream response invalid', { err: error });
+		throw error;
+	}
+
+	let reader: ReadableStreamDefaultReader<Uint8Array>;
+	try {
+		reader = response.body.getReader();
+	} catch (cause: unknown) {
+		throwStreamError(cause);
+	}
+
+	const decoder = new TextDecoder();
+	let buffer = '';
+	try {
+		while (true) {
+			let result: ReadableStreamReadResult<Uint8Array>;
+			try {
+				result = await reader.read();
+			} catch (cause: unknown) {
+				throwTransportError(cause, signal);
+			}
+
+			try {
+				buffer += decoder.decode(result.value, { stream: !result.done });
+			} catch (cause: unknown) {
+				throwStreamError(cause);
+			}
+
+			const frames = buffer.split(/\r?\n\r?\n/);
+			buffer = frames.pop() ?? '';
+			for (const frame of frames) {
+				const chunk = parseStreamFrame(frame);
+				if (chunk === 'done') return;
+				if (chunk !== undefined) yield chunk;
+			}
+
+			if (result.done) {
+				const chunk = parseStreamFrame(buffer);
+				if (chunk === 'done') return;
+				if (chunk !== undefined) yield chunk;
+				return;
+			}
+		}
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
+	}
+}
+
+/** Builds and sends a completion request, mapping transport and HTTP failures. */
+async function requestCompletion(
+	credentials: OpenAiCredentials,
+	messages: OpenAiMessageRequest[],
+	stream: boolean
+): Promise<{ response: Response; signal: AbortSignal }> {
+	const body = createOpenAiChatCompletionRequest(credentials, messages, stream);
+	const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	let response: Response;
+	try {
+		response = await fetchCompletion(credentials, body, signal);
+	} catch (cause: unknown) {
+		throwTransportError(cause, signal);
+	}
+
+	if (!response.ok) {
+		const error = await apiError(response);
+		log.error('completion request failed', { err: error });
+		throw error;
+	}
+
+	return { response, signal };
+}
+
 /** Creates a validated OpenAI-compatible chat completion request. */
 function createOpenAiChatCompletionRequest(
 	config: Pick<OpenAiCredentials, 'model'>,
-	messages: OpenAiMessageRequest[]
+	messages: OpenAiMessageRequest[],
+	stream: boolean
 ) {
 	return v.parse(OpenAiChatCompletionRequestSchema, {
 		...(config.model === undefined ? {} : { model: config.model }),
-		messages
+		messages,
+		stream
+	});
+}
+
+/** Sends a completion request with the common provider request settings. */
+async function fetchCompletion(
+	credentials: OpenAiCredentials,
+	body: OpenAiChatCompletionRequest,
+	signal: AbortSignal
+): Promise<Response> {
+	return fetch(completionUrl(credentials.endpoint), {
+		method: 'POST',
+		headers: {
+			...headers(credentials.apiKey),
+			...(body.stream ? { Accept: 'text/event-stream' } : {})
+		},
+		body: JSON.stringify(body),
+		signal
 	});
 }
 
@@ -182,20 +337,6 @@ function headers(apiKey: string | undefined): HeadersInit {
 		'Content-Type': 'application/json',
 		...(apiKey === undefined ? {} : { Authorization: `Bearer ${apiKey}` })
 	};
-}
-
-/** Sends a completion request with the common provider request settings. */
-async function fetchCompletion(
-	credentials: OpenAiCredentials,
-	body: OpenAiChatCompletionRequest,
-	signal: AbortSignal
-): Promise<Response> {
-	return fetch(completionUrl(credentials.endpoint), {
-		method: 'POST',
-		headers: headers(credentials.apiKey),
-		body: JSON.stringify(body),
-		signal
-	});
 }
 
 /** Converts a transport failure into the matching timeout or network error. */
@@ -230,6 +371,54 @@ async function apiError(response: Response): Promise<OpenAiApiError> {
 		response.status,
 		`OpenAI request failed with status ${response.status}${detail}`
 	);
+}
+
+/** Converts an unexpected stream-processing failure into a typed stream error. */
+function throwStreamError(cause: unknown): never {
+	const error = new OpenAiStreamError('OpenAI stream failed', { cause });
+	log.error('completion stream failed', { err: error });
+	throw error;
+}
+
+/** Parses one SSE data frame and skips malformed or non-content frames. */
+function parseStreamFrame(frame: string): OpenAiChatCompletionChunk | 'done' | undefined {
+	const data = frame
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith('data:'))
+		.map((line) => line.slice(5).replace(/^ /, ''))
+		.join('\n');
+	if (data === '') return undefined;
+	if (data === '[DONE]') return 'done';
+
+	let payload: unknown;
+	try {
+		payload = JSON.parse(data);
+	} catch (cause: unknown) {
+		log.warn('invalid completion stream JSON frame', { err: cause });
+		return undefined;
+	}
+
+	const parsed = v.safeParse(OpenAiStreamResponseSchema, payload);
+	if (!parsed.success) {
+		log.warn('invalid completion stream frame', { issues: parsed.issues });
+		return undefined;
+	}
+
+	const choice = parsed.output.choices[0];
+	if (choice === undefined) return undefined;
+
+	const content = choice.delta.content ?? undefined;
+	const reasoning = choice.delta.reasoning ?? choice.delta.reasoning_content ?? undefined;
+	const finishReason = choice.finish_reason ?? undefined;
+	if (content === undefined && reasoning === undefined && finishReason === undefined) {
+		return undefined;
+	}
+
+	return {
+		...(content === undefined ? {} : { content }),
+		...(reasoning === undefined ? {} : { reasoning }),
+		...(finishReason === undefined ? {} : { finishReason })
+	};
 }
 
 /** Converts a validated provider response into the application's response shape. */
