@@ -13,6 +13,11 @@
 		chatSession.sendMessage(content);
 	}
 
+	/** Regenerates the most recent assistant response. */
+	function handleRegenerateMessage() {
+		chatSession.regenerateLastMessage();
+	}
+
 	/** Stops the current response generation. */
 	function handleStopGeneration() {
 		chatSession.stopGeneration();
@@ -24,6 +29,7 @@
 	<ChatControls
 		isGenerating={chatSession.isGenerating}
 		onSendMessage={handleSendMessage}
+		onRegenerateMessage={handleRegenerateMessage}
 		onStopGeneration={handleStopGeneration}
 	/>
 </div>

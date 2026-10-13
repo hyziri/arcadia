@@ -1,8 +1,8 @@
 /** Manages reactive state and operations for a streamed chat conversation.
  *
  * User messages are trimmed and ignored when blank or while another response is generating.
- * Assistant text is appended as chunks arrive; failures are exposed through `generationError`,
- * and stopping preserves any partial response.
+ * Assistant text is streamed into history; regeneration keeps the previous answer until new
+ * content arrives. Failures are exposed through `generationError`, and stopping preserves partial content.
  *
  * @example
  * ```ts
@@ -54,6 +54,20 @@ export class ChatSession {
 		return this._generateAssistantResponse();
 	}
 
+	/** Regenerates the final assistant message, or responds to the current history if it is not assistant-authored.
+	 *
+	 * @returns Resolves when generation finishes or is ignored because another response is active.
+	 */
+	async regenerateLastMessage(): Promise<void> {
+		if (this.isGenerating) return;
+
+		const lastMessageIndex = this.messages.length - 1;
+		const lastMessage = this.messages[lastMessageIndex];
+		const replaceIndex = lastMessage?.sender === 'assistant' ? lastMessageIndex : undefined;
+
+		return this._generateAssistantResponse(replaceIndex);
+	}
+
 	/** Aborts the active response stream while preserving any received content.
 	 *
 	 * @returns Nothing.
@@ -63,20 +77,27 @@ export class ChatSession {
 	}
 
 	/** Owns one response's cancellation, streaming, and cleanup lifecycle. */
-	private async _generateAssistantResponse(): Promise<void> {
+	private async _generateAssistantResponse(replaceIndex?: number): Promise<void> {
 		this.isGenerating = true;
 		this.generationError = null;
 
 		const abortController = new AbortController();
 		this._abortController = abortController;
-		const requestMessages = this.messages.map(({ sender, content }) => ({ sender, content }));
-		const assistantMessageIndex = this.messages.push({ sender: 'assistant', content: '' }) - 1;
+		const requestEndIndex = replaceIndex ?? this.messages.length;
+		const requestMessages = this.messages
+			.slice(0, requestEndIndex)
+			.map(({ sender, content }) => ({ sender, content }));
+		const createsAssistantMessage = replaceIndex === undefined;
+		const assistantMessageIndex = createsAssistantMessage
+			? this.messages.push({ sender: 'assistant', content: '' }) - 1
+			: replaceIndex;
 
 		try {
 			await this._appendResponseChunks(
 				requestMessages,
 				assistantMessageIndex,
-				abortController.signal
+				abortController.signal,
+				replaceIndex !== undefined
 			);
 		} catch (cause: unknown) {
 			if (!abortController.signal.aborted) {
@@ -84,7 +105,7 @@ export class ChatSession {
 					cause instanceof Error ? cause.message : 'Failed to generate a response.';
 			}
 		} finally {
-			if (this.messages[assistantMessageIndex]?.content === '') {
+			if (createsAssistantMessage && this.messages[assistantMessageIndex]?.content === '') {
 				this.messages.splice(assistantMessageIndex, 1);
 			}
 			if (this._abortController === abortController) this._abortController = null;
@@ -96,13 +117,22 @@ export class ChatSession {
 	private async _appendResponseChunks(
 		requestMessages: ChatMessage[],
 		assistantMessageIndex: number,
-		abortSignal: AbortSignal
+		abortSignal: AbortSignal,
+		replaceOnFirstChunk: boolean
 	): Promise<void> {
+		let isFirstContentChunk = true;
 		for await (const chunk of this._llm.generateResponse(requestMessages, abortSignal)) {
-			if (chunk.content === undefined) continue;
+			if (chunk.content === undefined || chunk.content === '') continue;
 
 			const assistantMessage = this.messages[assistantMessageIndex];
-			if (assistantMessage !== undefined) assistantMessage.content += chunk.content;
+			if (assistantMessage === undefined) continue;
+
+			if (replaceOnFirstChunk && isFirstContentChunk) {
+				assistantMessage.content = chunk.content;
+			} else {
+				assistantMessage.content += chunk.content;
+			}
+			isFirstContentChunk = false;
 		}
 	}
 }
