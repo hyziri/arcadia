@@ -10,7 +10,7 @@
 	let { messages }: Props = $props();
 </script>
 
-<div class="flex flex-1 flex-col gap-2">
+<div class="flex flex-1 flex-col gap-2 overflow-y-auto">
 	{#each messages as message (message)}
 		<ChatMessageView {message} />
 	{/each}

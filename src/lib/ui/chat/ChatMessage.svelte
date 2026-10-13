@@ -9,6 +9,6 @@
 </script>
 
 <div class="w-full">
-	<span>{message.sender}</span>
+	<span class="font-bold">{message.sender}</span>
 	<span>{message.content}</span>
 </div>
