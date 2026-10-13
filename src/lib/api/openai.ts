@@ -141,6 +141,16 @@ export class OpenAiTimeoutError extends AppError {
 	}
 }
 
+/** Represents a request intentionally cancelled by its caller. */
+export class OpenAiAbortError extends AppError {
+	readonly kind = 'openai_abort';
+
+	/** Creates an OpenAI-compatible request cancellation error. */
+	constructor(options?: ErrorOptions) {
+		super('OpenAI request was aborted', options);
+	}
+}
+
 /** Represents a successful HTTP response with invalid JSON or an invalid payload. */
 export class OpenAiResponseError extends AppError {
 	readonly kind = 'openai_response';
@@ -161,6 +171,15 @@ export class OpenAiStreamError extends AppError {
 	}
 }
 
+/** Typed failures that can occur during an OpenAI-compatible request or stream. */
+export type OpenAiError =
+	| OpenAiAbortError
+	| OpenAiApiError
+	| OpenAiNetworkError
+	| OpenAiTimeoutError
+	| OpenAiResponseError
+	| OpenAiStreamError;
+
 /**
  * Requests and normalizes a non-streaming chat completion.
  *
@@ -178,7 +197,11 @@ export async function completeOpenAiChat(
 		messageCount: messages.length
 	});
 
-	const { response, signal } = await requestCompletion(credentials, messages, false);
+	const { response, timeoutSignal, callerSignal } = await requestCompletion(
+		credentials,
+		messages,
+		false
+	);
 
 	let payload: unknown;
 	try {
@@ -190,7 +213,7 @@ export async function completeOpenAiChat(
 			throw error;
 		}
 
-		throwTransportError(cause, signal);
+		throwTransportError(cause, timeoutSignal, callerSignal);
 	}
 
 	const parsed = v.safeParse(OpenAiCompletionResponseSchema, payload);
@@ -208,19 +231,26 @@ export async function completeOpenAiChat(
  *
  * @param credentials - The endpoint and optional provider credentials.
  * @param messages - The conversation messages to send.
+ * @param abortSignal - Optional signal used by the caller to cancel the stream.
  * @yields {OpenAiChatCompletionChunk} A content, reasoning, or finish-reason delta.
- * @throws {OpenAiApiError|OpenAiNetworkError|OpenAiTimeoutError|OpenAiResponseError|OpenAiStreamError} when the request or stream fails.
+ * @throws {OpenAiError} when the request or stream fails.
  */
 export async function* streamOpenAiChat(
 	credentials: OpenAiCredentials,
-	messages: OpenAiMessageRequest[]
+	messages: OpenAiMessageRequest[],
+	abortSignal?: AbortSignal
 ): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
 	log.trace('completion stream enter', {
 		model: credentials.model,
 		messageCount: messages.length
 	});
 
-	const { response, signal } = await requestCompletion(credentials, messages, true);
+	const { response, timeoutSignal, callerSignal } = await requestCompletion(
+		credentials,
+		messages,
+		true,
+		abortSignal
+	);
 	if (response.body === null) {
 		const error = new OpenAiResponseError('OpenAI returned no streaming response body');
 		log.error('completion stream response invalid', { err: error });
@@ -242,7 +272,7 @@ export async function* streamOpenAiChat(
 			try {
 				result = await reader.read();
 			} catch (cause: unknown) {
-				throwTransportError(cause, signal);
+				throwTransportError(cause, timeoutSignal, callerSignal);
 			}
 
 			try {
@@ -276,15 +306,22 @@ export async function* streamOpenAiChat(
 async function requestCompletion(
 	credentials: OpenAiCredentials,
 	messages: OpenAiMessageRequest[],
-	stream: boolean
-): Promise<{ response: Response; signal: AbortSignal }> {
+	stream: boolean,
+	callerSignal?: AbortSignal
+): Promise<{
+	response: Response;
+	timeoutSignal: AbortSignal;
+	callerSignal: AbortSignal | undefined;
+}> {
 	const body = createOpenAiChatCompletionRequest(credentials, messages, stream);
-	const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const signal =
+		callerSignal === undefined ? timeoutSignal : AbortSignal.any([callerSignal, timeoutSignal]);
 	let response: Response;
 	try {
 		response = await fetchCompletion(credentials, body, signal);
 	} catch (cause: unknown) {
-		throwTransportError(cause, signal);
+		throwTransportError(cause, timeoutSignal, callerSignal);
 	}
 
 	if (!response.ok) {
@@ -293,7 +330,7 @@ async function requestCompletion(
 		throw error;
 	}
 
-	return { response, signal };
+	return { response, timeoutSignal, callerSignal };
 }
 
 /** Creates a validated OpenAI-compatible chat completion request. */
@@ -339,9 +376,15 @@ function headers(apiKey: string | undefined): HeadersInit {
 	};
 }
 
-/** Converts a transport failure into the matching timeout or network error. */
-function throwTransportError(cause: unknown, signal: AbortSignal): never {
-	const error = signal.aborted
+/** Maps caller cancellation, timeout, and connection failures to their typed errors. */
+function throwTransportError(
+	cause: unknown,
+	timeoutSignal: AbortSignal,
+	callerSignal: AbortSignal | undefined
+): never {
+	if (callerSignal?.aborted) throw new OpenAiAbortError({ cause });
+
+	const error = timeoutSignal.aborted
 		? new OpenAiTimeoutError({ cause })
 		: new OpenAiNetworkError({ cause });
 	log.error('completion transport failed', { err: error });

@@ -1,4 +1,5 @@
 export {
+	OpenAiAbortError,
 	OpenAiApiError,
 	OpenAiChatCompletionChunkSchema,
 	OpenAiChatCompletionRequestSchema,
@@ -11,13 +12,12 @@ export {
 	OpenAiStreamError,
 	OpenAiTimeoutError,
 	completeOpenAiChat,
-	streamOpenAiChat
-} from './openai';
-export type {
-	OpenAiChatCompletionChunk,
-	OpenAiChatCompletionRequest,
-	OpenAiChatCompletionResult,
-	OpenAiCredentials,
-	OpenAiMessageRequest,
-	OpenAiMessageRole
+	streamOpenAiChat,
+	type OpenAiChatCompletionChunk,
+	type OpenAiChatCompletionRequest,
+	type OpenAiChatCompletionResult,
+	type OpenAiError,
+	type OpenAiCredentials,
+	type OpenAiMessageRequest,
+	type OpenAiMessageRole
 } from './openai';

@@ -1,21 +1,29 @@
 <script lang="ts">
-	import { type ChatMessage } from '#lib/model';
+	import { ChatSession } from '#lib/state/chat.svelte.ts';
+	import { LlmProvider } from '#lib/state/llm.svelte.ts';
 
 	import ChatControls from './ChatControls.svelte';
 	import ChatHistory from './ChatHistory.svelte';
 
-	let messages: ChatMessage[] = $state([]);
+	const llmProvider = new LlmProvider();
+	const chatSession = new ChatSession(llmProvider);
 
 	/** Adds a user message to the conversation history. */
-	function handleSend(content: string) {
-		messages.push({
-			sender: 'User',
-			content
-		});
+	function handleSendMessage(content: string) {
+		chatSession.sendMessage(content);
+	}
+
+	/** Stops the current response generation. */
+	function handleStopGeneration() {
+		chatSession.stopGeneration();
 	}
 </script>
 
 <div class="flex h-full w-full flex-1 flex-col gap-2 p-2">
-	<ChatHistory {messages} />
-	<ChatControls onSend={handleSend} />
+	<ChatHistory messages={chatSession.messages} />
+	<ChatControls
+		isGenerating={chatSession.isGenerating}
+		onSendMessage={handleSendMessage}
+		onStopGeneration={handleStopGeneration}
+	/>
 </div>

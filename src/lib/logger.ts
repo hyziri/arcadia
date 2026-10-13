@@ -21,7 +21,7 @@
  * ```
  */
 
-import { dev } from '$app/environment';
+import { dev } from '$app/env';
 
 /** Structured, non-secret context appended to a log message. */
 export type LogMeta = Record<string, unknown>;

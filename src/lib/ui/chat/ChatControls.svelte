@@ -1,21 +1,24 @@
 <script lang="ts">
-	import { Send } from '@lucide/svelte';
+	import { CircleStop, Send } from '@lucide/svelte';
 
 	interface Props {
-		onSend: (message: string) => void;
+		isGenerating: boolean;
+		onSendMessage: (message: string) => void;
+		onStopGeneration: () => void;
 	}
 
-	let { onSend }: Props = $props();
+	let { isGenerating, onSendMessage, onStopGeneration }: Props = $props();
 
 	let message = $state('');
 
 	let textarea: HTMLTextAreaElement;
 
+	/** Trims and sends the message if it contains non-whitespace text, then clears the input. */
 	function sendMessage() {
 		const trimmedMessage = message.trim();
 		if (!trimmedMessage) return;
 
-		onSend(trimmedMessage);
+		onSendMessage(trimmedMessage);
 		message = '';
 	}
 
@@ -34,7 +37,7 @@
 	}
 
 	$effect(() => {
-		message;
+		void message;
 		if (!textarea) return;
 
 		resizeTextarea();
@@ -47,7 +50,13 @@
 		bind:value={message}
 		class="textarea h-10 max-h-[40dvh] min-h-0 w-full resize-none overflow-y-auto"
 		onkeydown={handleKeydown}></textarea>
-	<button class="btn btn-square btn-ghost" onclick={sendMessage}>
-		<Send size={24} />
-	</button>
+	{#if isGenerating}
+		<button class="btn btn-square btn-ghost" onclick={onStopGeneration}>
+			<CircleStop size={24} />
+		</button>
+	{:else}
+		<button class="btn btn-square btn-ghost" onclick={sendMessage}>
+			<Send size={24} />
+		</button>
+	{/if}
 </div>
