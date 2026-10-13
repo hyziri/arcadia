@@ -7,29 +7,15 @@
 
 	const llmProvider = new LlmProvider();
 	const chatSession = new ChatSession(llmProvider);
-
-	/** Adds a user message to the conversation history. */
-	function handleSendMessage(content: string) {
-		chatSession.sendMessage(content);
-	}
-
-	/** Regenerates the most recent assistant response. */
-	function handleRegenerateMessage() {
-		chatSession.regenerateLastMessage();
-	}
-
-	/** Stops the current response generation. */
-	function handleStopGeneration() {
-		chatSession.stopGeneration();
-	}
 </script>
 
 <div class="flex h-full w-full flex-1 flex-col gap-2 p-2">
 	<ChatHistory messages={chatSession.messages} />
 	<ChatControls
 		isGenerating={chatSession.isGenerating}
-		onSendMessage={handleSendMessage}
-		onRegenerateMessage={handleRegenerateMessage}
-		onStopGeneration={handleStopGeneration}
+		onNewChat={() => chatSession.newChat()}
+		onSendMessage={(content) => chatSession.sendMessage(content)}
+		onRegenerateMessage={() => chatSession.regenerateLastMessage()}
+		onStopGeneration={() => chatSession.stopGeneration()}
 	/>
 </div>

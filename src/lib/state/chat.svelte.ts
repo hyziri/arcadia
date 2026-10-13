@@ -40,6 +40,14 @@ export class ChatSession {
 		this._llm = llm;
 	}
 
+	/** Clears the conversation history to start a new chat.
+	 *
+	 * @returns Resolves after the conversation history is cleared.
+	 */
+	async newChat(): Promise<void> {
+		this.messages = [];
+	}
+
 	/**
 	 * Adds a user message and streams the assistant response into the conversation.
 	 *

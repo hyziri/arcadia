@@ -1,14 +1,16 @@
 <script lang="ts">
-	import { CircleStop, Menu, RotateCcw, Send } from '@lucide/svelte';
+	import { CircleStop, Menu, MessageSquarePlus, RotateCcw, Send } from '@lucide/svelte';
 
 	interface Props {
 		isGenerating: boolean;
+		onNewChat: () => void;
 		onSendMessage: (message: string) => void;
 		onRegenerateMessage: () => void;
 		onStopGeneration: () => void;
 	}
 
-	let { isGenerating, onSendMessage, onRegenerateMessage, onStopGeneration }: Props = $props();
+	let { isGenerating, onNewChat, onSendMessage, onRegenerateMessage, onStopGeneration }: Props =
+		$props();
 
 	let message = $state('');
 	let isActionMenuOpen = $state(false);
@@ -94,6 +96,15 @@
 				id="chat-actions-menu"
 				class="absolute bottom-full left-0 z-10 mb-2 w-44 rounded-box border border-base-300 bg-base-100 p-2 shadow-lg"
 			>
+				<button
+					class="btn w-full justify-start gap-2 btn-ghost"
+					type="button"
+					disabled={isGenerating}
+					onclick={onNewChat}
+				>
+					<MessageSquarePlus size={18} />
+					<span>New Chat</span>
+				</button>
 				<button
 					class="btn w-full justify-start gap-2 btn-ghost"
 					type="button"
