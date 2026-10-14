@@ -12,6 +12,7 @@
  */
 
 import { migrateToV1 } from './001-add-settings-store';
+import { migrateToV2 } from './002-add-version-control-stores';
 import { type MigrationContext } from './context';
 
 /** A schema change associated with the database version it produces. */
@@ -24,7 +25,10 @@ interface Migration {
 }
 
 /** Migrations ordered by ascending target version. */
-const migrations: readonly Migration[] = [{ version: 1, migrate: migrateToV1 }];
+const migrations: readonly Migration[] = [
+	{ version: 1, migrate: migrateToV1 },
+	{ version: 2, migrate: migrateToV2 }
+];
 
 /**
  * Applies migrations newer than the current version and no newer than the requested version.
