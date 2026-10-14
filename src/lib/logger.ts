@@ -7,7 +7,7 @@
  *
  * @example
  * ```ts
- * import { getLogger } from '$lib/logger';
+ * import { getLogger } from '#lib/logger';
  *
  * const log = getLogger('data/character');
  *
