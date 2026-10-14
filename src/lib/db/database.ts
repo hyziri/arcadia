@@ -5,7 +5,7 @@
  *
  * @example
  * ```ts
- * import { getDatabase } from '$lib/db';
+ * import { getDatabase } from '#lib/db';
  *
  * const database = await getDatabase();
  * const themeSetting = await database.get('settings', 'theme');

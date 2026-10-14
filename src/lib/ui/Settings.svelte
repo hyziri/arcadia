@@ -1,1 +1,0 @@
-<p>Settings dialog</p>

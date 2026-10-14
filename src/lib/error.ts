@@ -7,7 +7,7 @@
  *
  * @example
  * ```ts
- * import { AppError } from '$lib/error';
+ * import { AppError } from '#lib/error';
  *
  * class CharacterNotFoundError extends AppError {
  * 	readonly kind = 'character_not_found';

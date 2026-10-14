@@ -4,7 +4,7 @@
  *
  * @example
  * ```ts
- * import { type OpenAiCredentials, type OpenAiMessageRequest, streamOpenAiChat } from '$lib/api';
+ * import { type OpenAiCredentials, type OpenAiMessageRequest, streamOpenAiChat } from '#lib/api';
  *
  * const messages: OpenAiMessageRequest[] = [{ role: 'user', content: 'Hello!' }];
  * for await (const chunk of streamOpenAiChat(credentials, messages)) {
