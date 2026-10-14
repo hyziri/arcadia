@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { Settings } from '@lucide/svelte';
-	import { getContext } from 'svelte';
 
-	import { DIALOG_CONTEXT, type DialogController } from '#lib/state';
+	import { getDialogContext } from '#lib/state';
 
-	const dialogController = getContext<DialogController>(DIALOG_CONTEXT);
+	const dialogController = getDialogContext();
 </script>
 
 <div class="navbar">
