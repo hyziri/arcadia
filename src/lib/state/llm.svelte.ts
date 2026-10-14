@@ -1,8 +1,8 @@
-/** Streams chat completions from the configured OpenAI-compatible API.
+/** Loads saved LLM settings and adapts chat history to the OpenAI-compatible API.
  *
- * The provider captures the public endpoint, model, and API key when constructed. Values
- * supplied through public environment variables are available to browser code and must not
- * be treated as secret credentials.
+ * The provider reads the latest persisted configuration for each request so settings changes take
+ * effect without recreating the chat session. Model and API key are omitted when blank because
+ * some compatible providers, such as local servers, do not require them.
  *
  * @example
  * ```ts
@@ -16,23 +16,47 @@
 import {
 	streamOpenAiChat,
 	type OpenAiChatCompletionChunk,
+	type OpenAiCredentials,
 	type OpenAiMessageRequest
-} from '../api';
-import { LLM_ENDPOINT, LLM_MODEL, LLM_API_KEY } from '$app/env/public';
+} from '#lib/api';
+import { AppError } from '#lib/error';
+import { getLogger } from '#lib/logger.ts';
+import { SettingsService } from '#lib/service';
+import type { ChatMessage, ProviderConfig } from '#lib/model';
 
-import type { ChatMessage, ProviderConfig } from '../model';
+/** Identifies which required LLM configuration value is missing. */
+export type LlmConfigurationIssue = 'provider' | 'endpoint';
 
-/** Adapts chat history to the configured OpenAI-compatible streaming API. */
+/** Indicates that no usable LLM provider configuration is available for a request. */
+export class LlmConfigurationError extends AppError {
+	readonly kind = 'llm_configuration';
+	readonly issue: LlmConfigurationIssue;
+
+	/** Creates an error identifying the missing provider configuration. */
+	constructor(issue: LlmConfigurationIssue) {
+		super(
+			issue === 'provider'
+				? 'No LLM provider is configured.'
+				: 'The LLM endpoint is not configured.'
+		);
+		this.issue = issue;
+	}
+}
+
+/** Logger scoped to LLM provider configuration and request preparation. */
+const log = getLogger('state/llm');
+
+/** Adapts configured chat history to the OpenAI-compatible streaming API. */
 export class LlmProvider {
-	private config: ProviderConfig;
+	private config: ProviderConfig | null = null;
+	private readonly _settingsService: SettingsService;
 
-	/** Creates a provider using the configured endpoint, model, and API key. */
-	constructor() {
-		this.config = {
-			endpoint: LLM_ENDPOINT,
-			model: LLM_MODEL,
-			apiKey: LLM_API_KEY
-		};
+	/** Creates a provider that reads persisted settings before each request.
+	 *
+	 * @param settingsService - The service used to load the current provider configuration.
+	 */
+	constructor(settingsService: SettingsService = new SettingsService()) {
+		this._settingsService = settingsService;
 	}
 
 	/**
@@ -41,20 +65,36 @@ export class LlmProvider {
 	 * @param messages - The conversation history to send to the provider.
 	 * @param abortSignal - Optional signal used by the caller to cancel generation.
 	 * @yields {OpenAiChatCompletionChunk} Normalized content, reasoning, or finish-reason chunks.
-	 * @throws {import('../api').OpenAiError} when the provider request or stream fails.
+	 * @throws {LlmConfigurationError|AppError|OpenAiError|Error|DOMException} when configuration, storage, or the provider request fails.
 	 */
 	async *generateResponse(
 		messages: ChatMessage[],
 		abortSignal?: AbortSignal
 	): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
-		yield* streamOpenAiChat(this.config, this._prepareMessages(messages), abortSignal);
+		this.config = (await this._settingsService.getProviderConfig()) ?? null;
+		if (this.config === null) this._throwConfigurationError('provider');
+
+		const endpoint = this.config.endpoint.trim();
+		if (endpoint === '') this._throwConfigurationError('endpoint');
+
+		const credentials: OpenAiCredentials = {
+			endpoint,
+			...(this.config.model.trim() === '' ? {} : { model: this.config.model }),
+			...(this.config.apiKey.trim() === '' ? {} : { apiKey: this.config.apiKey })
+		};
+
+		yield* streamOpenAiChat(credentials, this._prepareMessages(messages), abortSignal);
 	}
 
-	/** Converts chat history into the OpenAI-compatible request message shape. */
+	/** Converts history messages to the request message shape expected by the API. */
 	private _prepareMessages(messages: ChatMessage[]): OpenAiMessageRequest[] {
-		return messages.map(({ sender, content }) => ({
-			role: sender,
-			content
-		}));
+		return messages.map(({ sender, content }) => ({ role: sender, content }));
+	}
+
+	/** Logs and creates a typed configuration error at the provider boundary. */
+	private _throwConfigurationError(issue: LlmConfigurationIssue): never {
+		const error = new LlmConfigurationError(issue);
+		log.error('LLM configuration is incomplete', { err: error, issue });
+		throw error;
 	}
 }

@@ -127,7 +127,7 @@ export class OpenAiNetworkError extends AppError {
 
 	/** Creates an OpenAI-compatible network error. */
 	constructor(options?: ErrorOptions) {
-		super('OpenAI network request failed', options);
+		super('LLM provider network request failed', options);
 	}
 }
 
@@ -137,7 +137,7 @@ export class OpenAiTimeoutError extends AppError {
 
 	/** Creates an OpenAI-compatible timeout error. */
 	constructor(options?: ErrorOptions) {
-		super('OpenAI request timed out', options);
+		super('LLM provider request timed out', options);
 	}
 }
 
@@ -147,7 +147,7 @@ export class OpenAiAbortError extends AppError {
 
 	/** Creates an OpenAI-compatible request cancellation error. */
 	constructor(options?: ErrorOptions) {
-		super('OpenAI request was aborted', options);
+		super('LLM provider request was aborted', options);
 	}
 }
 
@@ -208,7 +208,7 @@ export async function completeOpenAiChat(
 		payload = await response.json();
 	} catch (cause: unknown) {
 		if (cause instanceof SyntaxError) {
-			const error = new OpenAiResponseError('OpenAI returned invalid JSON', { cause });
+			const error = new OpenAiResponseError('LLM provider returned invalid JSON', { cause });
 			log.error('completion response invalid', { err: error });
 			throw error;
 		}
@@ -218,7 +218,7 @@ export async function completeOpenAiChat(
 
 	const parsed = v.safeParse(OpenAiCompletionResponseSchema, payload);
 	if (!parsed.success) {
-		const error = new OpenAiResponseError('OpenAI returned an invalid completion response');
+		const error = new OpenAiResponseError('LLM provider returned an invalid completion response');
 		log.error('completion response invalid', { err: error });
 		throw error;
 	}
@@ -252,7 +252,7 @@ export async function* streamOpenAiChat(
 		abortSignal
 	);
 	if (response.body === null) {
-		const error = new OpenAiResponseError('OpenAI returned no streaming response body');
+		const error = new OpenAiResponseError('LLM provider returned no streaming response body');
 		log.error('completion stream response invalid', { err: error });
 		throw error;
 	}
@@ -402,23 +402,28 @@ async function apiError(response: Response): Promise<OpenAiApiError> {
 				typeof error === 'object' &&
 				error !== null &&
 				'message' in error &&
-				typeof error.message === 'string'
+				typeof error.message === 'string' &&
+				error.message.trim() !== ''
 			) {
-				detail = `: ${error.message}`;
+				detail = `: ${error.message.trim()}`;
 			}
 		}
 	} catch {
 		// The status is sufficient when the provider does not return JSON.
 	}
-	return new OpenAiApiError(
-		response.status,
-		`OpenAI request failed with status ${response.status}${detail}`
-	);
+	const message =
+		detail !== ''
+			? `LLM provider request failed with status ${response.status}${detail}`
+			: response.status === 401
+				? 'The LLM provider rejected the request as unauthorized. Its API key may be missing or invalid.'
+				: `LLM provider request failed with status ${response.status}`;
+
+	return new OpenAiApiError(response.status, message);
 }
 
 /** Converts an unexpected stream-processing failure into a typed stream error. */
 function throwStreamError(cause: unknown): never {
-	const error = new OpenAiStreamError('OpenAI stream failed', { cause });
+	const error = new OpenAiStreamError('LLM provider stream failed', { cause });
 	log.error('completion stream failed', { err: error });
 	throw error;
 }

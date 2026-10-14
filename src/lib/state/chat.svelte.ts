@@ -95,27 +95,15 @@ export class ChatSession {
 		const requestMessages = this.messages
 			.slice(0, requestEndIndex)
 			.map(({ sender, content }) => ({ sender, content }));
-		const createsAssistantMessage = replaceIndex === undefined;
-		const assistantMessageIndex = createsAssistantMessage
-			? this.messages.push({ sender: 'assistant', content: '' }) - 1
-			: replaceIndex;
 
 		try {
-			await this._appendResponseChunks(
-				requestMessages,
-				assistantMessageIndex,
-				abortController.signal,
-				replaceIndex !== undefined
-			);
+			await this._appendResponseChunks(requestMessages, replaceIndex, abortController.signal);
 		} catch (cause: unknown) {
 			if (!abortController.signal.aborted) {
 				this.generationError =
 					cause instanceof Error ? cause.message : 'Failed to generate a response.';
 			}
 		} finally {
-			if (createsAssistantMessage && this.messages[assistantMessageIndex]?.content === '') {
-				this.messages.splice(assistantMessageIndex, 1);
-			}
 			if (this._abortController === abortController) this._abortController = null;
 			this.isGenerating = false;
 		}
@@ -124,22 +112,27 @@ export class ChatSession {
 	/** Applies each streamed content delta to the assistant message in reactive history. */
 	private async _appendResponseChunks(
 		requestMessages: ChatMessage[],
-		assistantMessageIndex: number,
-		abortSignal: AbortSignal,
-		replaceOnFirstChunk: boolean
+		assistantMessageIndex: number | undefined,
+		abortSignal: AbortSignal
 	): Promise<void> {
 		let isFirstContentChunk = true;
 		for await (const chunk of this._llm.generateResponse(requestMessages, abortSignal)) {
 			if (chunk.content === undefined || chunk.content === '') continue;
 
-			const assistantMessage = this.messages[assistantMessageIndex];
-			if (assistantMessage === undefined) continue;
-
-			if (replaceOnFirstChunk && isFirstContentChunk) {
-				assistantMessage.content = chunk.content;
+			if (assistantMessageIndex === undefined) {
+				assistantMessageIndex =
+					this.messages.push({ sender: 'assistant', content: chunk.content }) - 1;
 			} else {
-				assistantMessage.content += chunk.content;
+				const assistantMessage = this.messages[assistantMessageIndex];
+				if (assistantMessage === undefined) continue;
+
+				if (isFirstContentChunk) {
+					assistantMessage.content = chunk.content;
+				} else {
+					assistantMessage.content += chunk.content;
+				}
 			}
+
 			isFirstContentChunk = false;
 		}
 	}
