@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { X } from '@lucide/svelte';
+	import { fade } from 'svelte/transition';
 
 	import { type Toast, type ToastKind } from '#lib/state';
 
@@ -28,6 +29,7 @@
 	{#each toasts as toast (toast.id)}
 		<div
 			class={`alert ${alertClass[toast.kind]} flex justify-between shadow-lg`}
+			out:fade={{ duration: 200 }}
 			role={toast.kind === 'error' ? 'alert' : 'status'}
 			onmouseenter={() => pauseToast(toast.id)}
 			onmouseleave={() => resumeToast(toast.id)}
