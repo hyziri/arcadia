@@ -119,6 +119,33 @@ export class CommitRepo {
 	}
 
 	/**
+	 * Gets all commits that use the requested commit as their alternate.
+	 *
+	 * @param commitId - The commit used as the alternate target.
+	 * @param transaction - The active transaction containing the commits store.
+	 * @returns The validated commits that reference the target as their alternate.
+	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError} when a row is invalid or the index cannot be queried.
+	 */
+	async getAllByAlternate(commitId: string, transaction: ArcadiaTransaction): Promise<Commit[]> {
+		try {
+			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) => {
+				const commits: Commit[] = [];
+				let cursor = await tx
+					.objectStore('commits')
+					.index('by-alternate')
+					.openCursor(IDBKeyRange.only(commitId));
+				while (cursor !== null) {
+					commits.push(parseCommit(cursor.value, cursor.primaryKey));
+					cursor = await cursor.continue();
+				}
+				return commits;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'read', commitId, undefined, cause);
+		}
+	}
+
+	/**
 	 * Counts commits that use the requested commit as their parent.
 	 *
 	 * @param commitId - The commit whose children should be counted.

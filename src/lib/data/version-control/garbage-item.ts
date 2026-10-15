@@ -74,7 +74,7 @@ export class GarbageItemRepo {
 				async (tx) =>
 					tx.objectStore('garbageJobItems').index('by-job-state').get([jobId, 'pending'])
 			);
-			return storedItem === undefined ? undefined : parseGarbageJobItem(storedItem);
+			return storedItem === undefined ? undefined : parseGarbageJobItem(storedItem, jobId);
 		} catch (cause: unknown) {
 			throwGarbageDatabaseFailure(log, 'item', 'read', jobId, cause);
 		}
@@ -103,7 +103,7 @@ export class GarbageItemRepo {
 					if (storedItem === undefined) {
 						await store.add(v.parse(GarbageJobItemSchema, { jobId, commitId, state: 'pending' }));
 					} else {
-						parseGarbageJobItem(storedItem);
+						parseGarbageJobItem(storedItem, jobId, commitId);
 					}
 				}
 			});
@@ -133,7 +133,7 @@ export class GarbageItemRepo {
 				const store = tx.objectStore('garbageJobItems');
 				const storedItem: unknown = await store.get([jobId, commitId]);
 				if (storedItem === undefined) return;
-				const item = parseGarbageJobItem(storedItem);
+				const item = parseGarbageJobItem(storedItem, jobId, commitId);
 				await store.put(v.parse(GarbageJobItemSchema, { ...item, state }));
 			});
 		} catch (cause: unknown) {
@@ -221,14 +221,47 @@ export class GarbageItemRepo {
 }
 
 /** Validates a work item read from IndexedDB. */
-function parseGarbageJobItem(storedRow: unknown): GarbageJobItem {
+function parseGarbageJobItem(
+	storedRow: unknown,
+	expectedJobId?: string,
+	expectedCommitId?: string
+): GarbageJobItem {
 	const parsed = v.safeParse(GarbageJobItemSchema, storedRow);
-	if (parsed.success) return parsed.output;
 	const jobId = getStringField(storedRow, 'jobId');
 	const commitId = getStringField(storedRow, 'commitId');
 	const recordId =
 		jobId === undefined || commitId === undefined ? undefined : `${jobId}:${commitId}`;
-	throwGarbageCorruptError(log, 'corrupt garbage-collection work item', recordId, parsed.issues);
+	if (!parsed.success) {
+		throwGarbageCorruptError(log, 'corrupt garbage-collection work item', recordId, parsed.issues);
+	}
+
+	if (expectedJobId !== undefined) {
+		const identity = v.safeParse(v.object({ jobId: v.literal(expectedJobId) }), parsed.output);
+		if (!identity.success) {
+			throwGarbageCorruptError(
+				log,
+				'garbage-collection work item job mismatch',
+				recordId,
+				identity.issues
+			);
+		}
+	}
+	if (expectedCommitId !== undefined) {
+		const identity = v.safeParse(
+			v.object({ commitId: v.literal(expectedCommitId) }),
+			parsed.output
+		);
+		if (!identity.success) {
+			throwGarbageCorruptError(
+				log,
+				'garbage-collection work item commit mismatch',
+				recordId,
+				identity.issues
+			);
+		}
+	}
+
+	return parsed.output;
 }
 
 /** Scans the compound primary key for one job-scoped work item after the durable cursor. */
@@ -243,8 +276,9 @@ async function findItemAfter(
 			? IDBKeyRange.bound([jobId], [jobId, []])
 			: IDBKeyRange.lowerBound([jobId, cursorCommitId], true);
 	let cursor = await transaction.objectStore('garbageJobItems').openCursor(range);
-	while (cursor !== null && cursor.value.jobId === jobId) {
-		const item = parseGarbageJobItem(cursor.value);
+	while (cursor !== null) {
+		if (cursor.primaryKey[0] !== jobId) break;
+		const item = parseGarbageJobItem(cursor.value, jobId);
 		if (includeCollected || item.state !== 'collected') return item;
 		cursor = await cursor.continue();
 	}

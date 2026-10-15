@@ -30,7 +30,8 @@ import {
 	RefRepo,
 	RepoRepo,
 	UpdateDbRefParamSchema,
-	type CreateDbCommitParam
+	type CreateDbCommitParam,
+	type UpdateDbRefParam
 } from '#lib/data';
 import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
@@ -119,6 +120,14 @@ class MutableRepoRepo extends RepoRepo {
 
 /** Exposes ref deletion only to the version-control orchestrator. */
 class MutableRefRepo extends RefRepo {
+	updateValidated(
+		ref: Ref,
+		updateRefParam: UpdateDbRefParam,
+		transaction: ArcadiaTransaction<'readwrite'>
+	): Promise<Ref> {
+		return this._update(ref, updateRefParam, transaction);
+	}
+
 	delete(ref: Ref, transaction: ArcadiaTransaction<'readwrite'>): Promise<boolean> {
 		return this._delete(ref, transaction);
 	}
@@ -433,7 +442,7 @@ export class VersionControlService {
 						tx
 					);
 				}
-				return this._refRepo.update(repoId, refId, input, tx);
+				return this._refRepo.updateValidated(currentRef, input, tx);
 			}
 		);
 

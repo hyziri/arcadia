@@ -213,27 +213,58 @@ export class RefRepo {
 		let updated: Ref | undefined;
 		try {
 			updated = await withTransaction(this._db, ['refs'], 'readwrite', transaction, async (tx) => {
-				const store = tx.objectStore('refs');
-				const storedRow: unknown = await store.get(refId);
+				const storedRow: unknown = await tx.objectStore('refs').get(refId);
 				if (storedRow === undefined) return undefined;
 
 				const currentRef = parseRef(storedRow, repoId, refId);
 				assertRefOwnership(currentRef, repoId);
-				const updatedRef = v.parse(RefSchema, {
-					...currentRef,
-					...input,
-					updatedAt: Date.now()
-				});
-				await store.put(updatedRef);
-				return updatedRef;
+				return this._update(currentRef, input, tx);
 			});
 		} catch (cause: unknown) {
 			throwVersionControlDatabaseFailure(log, 'ref', 'update', refId, repoId, cause);
 		}
 
-		if (updated === undefined) return undefined;
-		log.debug('reference updated', { repoId, refId });
 		return updated;
+	}
+
+	/**
+	 * Writes an updated reference that was already read and ownership-checked in this transaction.
+	 *
+	 * @param currentRef - The validated current row.
+	 * @param updateRefParam - The mutable fields to apply.
+	 * @param transaction - The caller-owned transaction containing the reference store.
+	 * @returns The updated reference row.
+	 * @throws {v.ValiError|VersionControlDatabaseError|TransactionScopeError} when validation or persistence fails.
+	 */
+	protected async _update(
+		currentRef: Ref,
+		updateRefParam: UpdateDbRefParam,
+		transaction: ArcadiaTransaction<'readwrite'>
+	): Promise<Ref> {
+		log.trace('update enter', { repoId: currentRef.repoId, refId: currentRef.id });
+		const updatedRef = v.parse(RefSchema, {
+			...currentRef,
+			...updateRefParam,
+			updatedAt: Date.now()
+		});
+
+		try {
+			await withTransaction(this._db, ['refs'], 'readwrite', transaction, async (tx) => {
+				await tx.objectStore('refs').put(updatedRef);
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(
+				log,
+				'ref',
+				'update',
+				currentRef.id,
+				currentRef.repoId,
+				cause
+			);
+		}
+
+		log.debug('reference updated', { repoId: currentRef.repoId, refId: currentRef.id });
+		return updatedRef;
 	}
 
 	/**

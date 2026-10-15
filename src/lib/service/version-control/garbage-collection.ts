@@ -170,11 +170,14 @@ export class GarbageCollectionService {
 			return true;
 		}
 
+		const alternateCommits = await this._commitRepo.getAllByAlternate(commit.id, transaction);
 		await this._garbageItemRepo.enqueueCandidates(
 			job.id,
-			[commit.parentCommitId, commit.alternateOfCommitId].filter(
-				(commitId): commitId is string => commitId !== null
-			),
+			[
+				commit.parentCommitId,
+				commit.alternateOfCommitId,
+				...alternateCommits.map((alternateCommit) => alternateCommit.id)
+			].filter((commitId): commitId is string => commitId !== null),
 			transaction
 		);
 		await this._garbageItemRepo.setState(job.id, item.commitId, 'discovered', transaction);
