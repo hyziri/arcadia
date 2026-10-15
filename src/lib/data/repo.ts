@@ -1,31 +1,28 @@
 /** Persists and validates version-control repositories in IndexedDB.
  *
- * Repository rows identify the version-control resource kind. Create, read, and delete operations
- * validate inputs and stored rows, and can participate in caller-owned transactions.
+ * Repository rows identify the version-control resource kind. Create and read operations validate
+ * inputs and stored rows, and can participate in caller-owned transactions. Deletion is unavailable
+ * while repositories may own refs and commits.
  *
  * @example
  * ```ts
+ * import { getDatabase } from '#lib/db';
  * import { RepoRepo } from '#lib/data';
  *
- * const repoRepo = new RepoRepo();
+ * const database = await getDatabase();
+ * const repoRepo = new RepoRepo(database);
  * const repository = await repoRepo.get('repo-123');
  * ```
  */
 
 import * as v from 'valibot';
 
-import { getDatabase, withTransaction, type ArcadiaTransaction } from '#lib/db';
+import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
-import { RepoKindSchema, RepoSchema, type RepoKind } from '#lib/model';
+import { RepoKindSchema, RepoSchema, type Repo, type RepoKind } from '#lib/model';
 
 import { throwVersionControlDatabaseFailure } from './version-control-errors';
-
-/** Validates a repository row persisted in IndexedDB. */
-export const DbRepoSchema = RepoSchema;
-
-/** A validated repository row as persisted in IndexedDB. */
-export type DbRepo = v.InferOutput<typeof DbRepoSchema>;
 
 /** Logger scoped to repository persistence and validation. */
 const log = getLogger('data/repo');
@@ -34,47 +31,44 @@ const log = getLogger('data/repo');
 export class RepoCorruptError extends AppError {
 	readonly kind = 'repo_corrupt';
 	readonly repoId: string;
-	readonly issues: readonly v.InferIssue<typeof DbRepoSchema>[];
+	readonly issues: readonly v.InferIssue<typeof RepoSchema>[];
 
 	/** Creates an error describing an invalid persisted repository row. */
-	constructor(repoId: string, issues: readonly v.InferIssue<typeof DbRepoSchema>[]) {
+	constructor(repoId: string, issues: readonly v.InferIssue<typeof RepoSchema>[]) {
 		super(`Persisted repository is invalid: ${repoId}`);
 		this.repoId = repoId;
 		this.issues = issues;
 	}
 }
 
-/** Provides validated create, read, and delete operations for repositories. */
+/** Provides validated create and read operations for repositories. */
 export class RepoRepo {
+	private readonly _db: Database;
+
+	/** Creates a repository backed by the supplied database connection. */
+	constructor(database: Database) {
+		this._db = database;
+	}
+
 	/**
-	 * Creates a repository with the supplied ID.
+	 * Creates a repository and generates its ID.
 	 *
-	 * @param repoId - The ID assigned to the repository.
 	 * @param repoKind - The kind of data grouped by the repository.
 	 * @param transaction - Optional caller-owned transaction spanning repository operations.
 	 * @returns The created repository row.
 	 * @throws {v.ValiError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
-	async create(
-		repoId: string,
-		repoKind: RepoKind,
-		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<DbRepo> {
-		log.trace('create enter', { repoId });
+	async create(repoKind: RepoKind, transaction?: ArcadiaTransaction<'readwrite'>): Promise<Repo> {
+		log.trace('create enter');
 
 		const kind = v.parse(RepoKindSchema, repoKind);
-		const repo = v.parse(DbRepoSchema, { id: repoId, kind, createdAt: Date.now() });
+		const repoId = crypto.randomUUID();
+		const repo = v.parse(RepoSchema, { id: repoId, kind, createdAt: Date.now() });
 
 		try {
-			await withTransaction(
-				await getDatabase(),
-				['repos'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					await tx.objectStore('repos').add(repo);
-				}
-			);
+			await withTransaction(this._db, ['repos'], 'readwrite', transaction, async (tx) => {
+				await tx.objectStore('repos').add(repo);
+			});
 		} catch (cause: unknown) {
 			throwVersionControlDatabaseFailure(log, 'repo', 'create', repoId, undefined, cause);
 		}
@@ -91,17 +85,13 @@ export class RepoRepo {
 	 * @returns The validated repository, or `undefined` if it does not exist.
 	 * @throws {RepoCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the row is corrupt or the IndexedDB read fails.
 	 */
-	async get(repoId: string, transaction?: ArcadiaTransaction): Promise<DbRepo | undefined> {
+	async get(repoId: string, transaction?: ArcadiaTransaction): Promise<Repo | undefined> {
 		log.trace('get enter', { repoId });
 
 		let storedRow: unknown;
 		try {
-			storedRow = await withTransaction(
-				await getDatabase(),
-				['repos'],
-				'readonly',
-				transaction,
-				async (tx) => tx.objectStore('repos').get(repoId)
+			storedRow = await withTransaction(this._db, ['repos'], 'readonly', transaction, async (tx) =>
+				tx.objectStore('repos').get(repoId)
 			);
 		} catch (cause: unknown) {
 			throwVersionControlDatabaseFailure(log, 'repo', 'read', repoId, undefined, cause);
@@ -110,39 +100,11 @@ export class RepoRepo {
 		if (storedRow === undefined) return undefined;
 		return parseRepo(storedRow, repoId);
 	}
-
-	/**
-	 * Deletes a repository row without cascading into refs or commits.
-	 *
-	 * @param repoId - The repository ID to delete.
-	 * @param transaction - Optional caller-owned transaction spanning repository operations.
-	 * @returns A promise that resolves when the row is deleted.
-	 * @throws {VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the IndexedDB write fails.
-	 */
-	async delete(repoId: string, transaction?: ArcadiaTransaction<'readwrite'>): Promise<void> {
-		log.trace('delete enter', { repoId });
-
-		try {
-			await withTransaction(
-				await getDatabase(),
-				['repos'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					await tx.objectStore('repos').delete(repoId);
-				}
-			);
-		} catch (cause: unknown) {
-			throwVersionControlDatabaseFailure(log, 'repo', 'delete', repoId, undefined, cause);
-		}
-
-		log.debug('repository deleted', { repoId });
-	}
 }
 
 /** Validates a repository row read from IndexedDB. */
-function parseRepo(storedRow: unknown, repoId: string): DbRepo {
-	const parsed = v.safeParse(DbRepoSchema, storedRow);
+function parseRepo(storedRow: unknown, repoId: string): Repo {
+	const parsed = v.safeParse(RepoSchema, storedRow);
 	if (!parsed.success) {
 		const error = new RepoCorruptError(repoId, parsed.issues);
 		log.error('corrupt repository row', { err: error, repoId });

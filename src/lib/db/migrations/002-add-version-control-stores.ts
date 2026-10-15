@@ -33,14 +33,15 @@ export function migrateToV2({ database, transaction }: MigrationContext): void {
 	const commits = database.objectStoreNames.contains('commits')
 		? transaction.objectStore('commits')
 		: database.createObjectStore('commits', { keyPath: 'id' });
+	const legacyCommits = commits as unknown as IDBObjectStore;
 
-	if (!commits.indexNames.contains('by-repo')) {
-		commits.createIndex('by-repo', 'repoId');
+	if (!legacyCommits.indexNames.contains('by-repo')) {
+		legacyCommits.createIndex('by-repo', 'repoId');
 	}
-	if (!commits.indexNames.contains('by-repo-parent')) {
-		commits.createIndex('by-repo-parent', ['repoId', 'parentCommitId']);
+	if (!legacyCommits.indexNames.contains('by-repo-parent')) {
+		legacyCommits.createIndex('by-repo-parent', ['repoId', 'parentCommitId']);
 	}
-	if (!commits.indexNames.contains('by-repo-alternate')) {
-		commits.createIndex('by-repo-alternate', ['repoId', 'alternateOfCommitId']);
+	if (!legacyCommits.indexNames.contains('by-repo-alternate')) {
+		legacyCommits.createIndex('by-repo-alternate', ['repoId', 'alternateOfCommitId']);
 	}
 }

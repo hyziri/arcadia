@@ -19,6 +19,7 @@ import {
 	type OpenAiCredentials,
 	type OpenAiMessageRequest
 } from '#lib/api';
+import { getDatabase } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger.ts';
 import { SettingsService } from '#lib/service';
@@ -49,13 +50,13 @@ const log = getLogger('state/llm');
 /** Adapts configured chat history to the OpenAI-compatible streaming API. */
 export class LlmProvider {
 	private config: ProviderConfig | null = null;
-	private readonly _settingsService: SettingsService;
+	private _settingsService: SettingsService | undefined;
 
 	/** Creates a provider that reads persisted settings before each request.
 	 *
 	 * @param settingsService - The service used to load the current provider configuration.
 	 */
-	constructor(settingsService: SettingsService = new SettingsService()) {
+	constructor(settingsService?: SettingsService) {
 		this._settingsService = settingsService;
 	}
 
@@ -71,6 +72,9 @@ export class LlmProvider {
 		messages: ChatMessage[],
 		abortSignal?: AbortSignal
 	): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
+		if (this._settingsService === undefined) {
+			this._settingsService = new SettingsService(await getDatabase());
+		}
 		this.config = (await this._settingsService.getProviderConfig()) ?? null;
 		if (this.config === null) this._throwConfigurationError('provider');
 

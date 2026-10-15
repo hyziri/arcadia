@@ -6,9 +6,11 @@
  *
  * @example
  * ```ts
+ * import { getDatabase } from '#lib/db';
  * import { SettingsRepo } from '#lib/data';
  *
- * const settingsRepo = new SettingsRepo();
+ * const database = await getDatabase();
+ * const settingsRepo = new SettingsRepo(database);
  * await settingsRepo.set('appearance.theme', 'dark');
  * const themeSetting = await settingsRepo.get('appearance.theme');
  * ```
@@ -16,7 +18,7 @@
 
 import * as v from 'valibot';
 
-import { getDatabase, withTransaction, type ArcadiaTransaction } from '#lib/db';
+import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
 
@@ -78,6 +80,13 @@ export class SettingsDatabaseError extends AppError {
 
 /** Provides validated create, read, and delete operations for application settings. */
 export class SettingsRepo {
+	private readonly _db: Database;
+
+	/** Creates a settings repository backed by the supplied database connection. */
+	constructor(database: Database) {
+		this._db = database;
+	}
+
 	/**
 	 * Creates or replaces a setting value.
 	 *
@@ -96,15 +105,9 @@ export class SettingsRepo {
 
 		const setting = v.parse(DbSettingSchema, { key: settingKey, value });
 		try {
-			await withTransaction(
-				await getDatabase(),
-				['settings'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					await tx.objectStore('settings').put(setting);
-				}
-			);
+			await withTransaction(this._db, ['settings'], 'readwrite', transaction, async (tx) => {
+				await tx.objectStore('settings').put(setting);
+			});
 		} catch (cause: unknown) {
 			throwDatabaseFailure('write', settingKey, cause);
 		}
@@ -126,7 +129,7 @@ export class SettingsRepo {
 		let storedRow: unknown;
 		try {
 			storedRow = await withTransaction(
-				await getDatabase(),
+				this._db,
 				['settings'],
 				'readonly',
 				transaction,
@@ -155,15 +158,9 @@ export class SettingsRepo {
 		log.trace('delete enter', { settingKey });
 
 		try {
-			await withTransaction(
-				await getDatabase(),
-				['settings'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					await tx.objectStore('settings').delete(settingKey);
-				}
-			);
+			await withTransaction(this._db, ['settings'], 'readwrite', transaction, async (tx) => {
+				await tx.objectStore('settings').delete(settingKey);
+			});
 		} catch (cause: unknown) {
 			throwDatabaseFailure('delete', settingKey, cause);
 		}

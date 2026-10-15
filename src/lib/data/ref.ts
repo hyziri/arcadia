@@ -5,43 +5,34 @@
  *
  * @example
  * ```ts
+ * import { getDatabase } from '#lib/db';
  * import { RefRepo } from '#lib/data';
  *
- * const refRepo = new RefRepo();
+ * const database = await getDatabase();
+ * const refRepo = new RefRepo(database);
  * const mainRef = await refRepo.get('repo-123', 'ref-main');
  * ```
  */
 
 import * as v from 'valibot';
 
-import { getDatabase, withTransaction, type ArcadiaTransaction } from '#lib/db';
+import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
-import { RefSchema } from '#lib/model';
+import { RefSchema, type Ref } from '#lib/model';
 
 import {
 	reportVersionControlOwnershipFailure,
 	throwVersionControlDatabaseFailure
 } from './version-control-errors';
 
-/** Validates a reference row persisted in IndexedDB. */
-export const DbRefSchema = RefSchema;
-
 /** Validates fields accepted when creating a reference. */
-export const CreateDbRefParamSchema = v.omit(DbRefSchema, [
-	'id',
-	'repoId',
-	'createdAt',
-	'updatedAt'
-]);
+export const CreateDbRefParamSchema = v.omit(RefSchema, ['id', 'repoId', 'createdAt', 'updatedAt']);
 
 /** Validates mutable reference fields. */
 export const UpdateDbRefParamSchema = v.partial(
-	v.omit(DbRefSchema, ['id', 'repoId', 'createdAt', 'updatedAt'])
+	v.omit(RefSchema, ['id', 'repoId', 'createdAt', 'updatedAt'])
 );
-
-/** A validated reference row as persisted in IndexedDB. */
-export type DbRef = v.InferOutput<typeof DbRefSchema>;
 
 /** Fields required to create a reference. */
 export type CreateDbRefParam = v.InferOutput<typeof CreateDbRefParamSchema>;
@@ -57,10 +48,10 @@ export class RefCorruptError extends AppError {
 	readonly kind = 'ref_corrupt';
 	readonly refId: string;
 	readonly repoId: string;
-	readonly issues: readonly v.InferIssue<typeof DbRefSchema>[];
+	readonly issues: readonly v.InferIssue<typeof RefSchema>[];
 
 	/** Creates an error describing an invalid persisted reference row. */
-	constructor(refId: string, repoId: string, issues: readonly v.InferIssue<typeof DbRefSchema>[]) {
+	constructor(refId: string, repoId: string, issues: readonly v.InferIssue<typeof RefSchema>[]) {
 		super(`Persisted reference is invalid: ${refId}`);
 		this.refId = refId;
 		this.repoId = repoId;
@@ -68,13 +59,19 @@ export class RefCorruptError extends AppError {
 	}
 }
 
-/** Provides validated create, read, update, and delete operations for refs. */
+/** Provides validated create, read, and update operations for refs. */
 export class RefRepo {
+	private readonly _db: Database;
+
+	/** Creates a reference repository backed by the supplied database connection. */
+	constructor(database: Database) {
+		this._db = database;
+	}
+
 	/**
-	 * Creates a named reference in a repository.
+	 * Creates a named reference with a generated UUID.
 	 *
 	 * @param repoId - The owning repository ID.
-	 * @param refId - The ID assigned to the reference.
 	 * @param createRefParam - The reference name and target commit ID.
 	 * @param transaction - Optional caller-owned transaction spanning repository operations.
 	 * @returns The created reference row.
@@ -82,15 +79,15 @@ export class RefRepo {
 	 */
 	async create(
 		repoId: string,
-		refId: string,
 		createRefParam: CreateDbRefParam,
 		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<DbRef> {
-		log.trace('create enter', { repoId, refId });
+	): Promise<Ref> {
+		log.trace('create enter', { repoId });
 
 		const input = v.parse(CreateDbRefParamSchema, createRefParam);
+		const refId = crypto.randomUUID();
 		const now = Date.now();
-		const ref = v.parse(DbRefSchema, {
+		const ref = v.parse(RefSchema, {
 			...input,
 			id: refId,
 			repoId,
@@ -99,7 +96,7 @@ export class RefRepo {
 		});
 
 		try {
-			await withTransaction(await getDatabase(), ['refs'], 'readwrite', transaction, async (tx) => {
+			await withTransaction(this._db, ['refs'], 'readwrite', transaction, async (tx) => {
 				await tx.objectStore('refs').add(ref);
 			});
 		} catch (cause: unknown) {
@@ -123,17 +120,13 @@ export class RefRepo {
 		repoId: string,
 		refId: string,
 		transaction?: ArcadiaTransaction
-	): Promise<DbRef | undefined> {
+	): Promise<Ref | undefined> {
 		log.trace('get enter', { repoId, refId });
 
 		let storedRow: unknown;
 		try {
-			storedRow = await withTransaction(
-				await getDatabase(),
-				['refs'],
-				'readonly',
-				transaction,
-				async (tx) => tx.objectStore('refs').get(refId)
+			storedRow = await withTransaction(this._db, ['refs'], 'readonly', transaction, async (tx) =>
+				tx.objectStore('refs').get(refId)
 			);
 		} catch (cause: unknown) {
 			throwVersionControlDatabaseFailure(log, 'ref', 'read', refId, repoId, cause);
@@ -146,47 +139,82 @@ export class RefRepo {
 	}
 
 	/**
+	 * Gets all references in a repository, validating rows and sorting by name.
+	 *
+	 * @param repoId - The owning repository ID.
+	 * @param transaction - Optional caller-owned transaction containing the reference store.
+	 * @returns The repository's validated references in case-insensitive name order.
+	 * @throws {RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is invalid, belongs to another repository, or cannot be read.
+	 */
+	async getAllByRepo(repoId: string, transaction?: ArcadiaTransaction): Promise<Ref[]> {
+		log.trace('getAllByRepo enter', { repoId });
+
+		let refs: Ref[];
+		try {
+			refs = await withTransaction(this._db, ['refs'], 'readonly', transaction, async (tx) => {
+				const refs: Ref[] = [];
+				let cursor = await tx.objectStore('refs').index('by-repo').openCursor(repoId);
+				while (cursor !== null) {
+					const ref = parseRef(cursor.value, repoId, cursor.primaryKey);
+					assertRefOwnership(ref, repoId);
+					refs.push(ref);
+					cursor = await cursor.continue();
+				}
+				return refs;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'ref', 'read', repoId, repoId, cause);
+		}
+
+		return refs.sort(
+			(left, right) =>
+				left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }) ||
+				left.id.localeCompare(right.id)
+		);
+	}
+
+	/**
 	 * Updates a reference's name or target commit.
 	 *
 	 * @param repoId - The expected owning repository ID.
 	 * @param refId - The reference ID to update.
 	 * @param updateRefParam - The mutable reference fields to apply.
 	 * @param transaction - Optional caller-owned transaction spanning repository operations.
+	 * @param validateUpdate - Optional service-level invariant check run in the transaction before writing; it must not await non-IndexedDB work.
 	 * @returns The updated reference, or `undefined` if it does not exist.
-	 * @throws {v.ValiError|RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
+	 * @throws {AppError|v.ValiError} when validation or persistence fails.
 	 */
 	async update(
 		repoId: string,
 		refId: string,
 		updateRefParam: UpdateDbRefParam,
-		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<DbRef | undefined> {
+		transaction?: ArcadiaTransaction<'readwrite'>,
+		validateUpdate?: (
+			currentRef: Ref,
+			transaction: ArcadiaTransaction<'readwrite'>
+		) => Promise<void>
+	): Promise<Ref | undefined> {
 		log.trace('update enter', { repoId, refId });
 
 		const input = v.parse(UpdateDbRefParamSchema, updateRefParam);
-		let updated: DbRef | undefined;
+		let updated: Ref | undefined;
 		try {
-			updated = await withTransaction(
-				await getDatabase(),
-				['refs'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					const store = tx.objectStore('refs');
-					const storedRow: unknown = await store.get(refId);
-					if (storedRow === undefined) return undefined;
+			updated = await withTransaction(this._db, ['refs'], 'readwrite', transaction, async (tx) => {
+				const store = tx.objectStore('refs');
+				const storedRow: unknown = await store.get(refId);
+				if (storedRow === undefined) return undefined;
 
-					const currentRef = parseRef(storedRow, repoId, refId);
-					assertRefOwnership(currentRef, repoId);
-					const updatedRef = v.parse(DbRefSchema, {
-						...currentRef,
-						...input,
-						updatedAt: Date.now()
-					});
-					await store.put(updatedRef);
-					return updatedRef;
-				}
-			);
+				const currentRef = parseRef(storedRow, repoId, refId);
+				assertRefOwnership(currentRef, repoId);
+				await validateUpdate?.(currentRef, tx);
+				const updatedRef = v.parse(RefSchema, {
+					...currentRef,
+					...input,
+					updatedAt: Date.now()
+				});
+				await store.put(updatedRef);
+				return updatedRef;
+			});
 		} catch (cause: unknown) {
 			throwVersionControlDatabaseFailure(log, 'ref', 'update', refId, repoId, cause);
 		}
@@ -195,54 +223,11 @@ export class RefRepo {
 		log.debug('reference updated', { repoId, refId });
 		return updated;
 	}
-
-	/**
-	 * Deletes a reference without deleting commits it points to.
-	 *
-	 * @param repoId - The expected owning repository ID.
-	 * @param refId - The reference ID to delete.
-	 * @param transaction - Optional caller-owned transaction spanning repository operations.
-	 * @returns `true` if a reference was deleted, otherwise `false`.
-	 * @throws {RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the row is invalid, belongs to another repository, or cannot be deleted.
-	 */
-	async delete(
-		repoId: string,
-		refId: string,
-		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<boolean> {
-		log.trace('delete enter', { repoId, refId });
-
-		let deleted: boolean;
-		try {
-			deleted = await withTransaction(
-				await getDatabase(),
-				['refs'],
-				'readwrite',
-				transaction,
-				async (tx) => {
-					const store = tx.objectStore('refs');
-					const storedRow: unknown = await store.get(refId);
-					if (storedRow === undefined) return false;
-
-					const ref = parseRef(storedRow, repoId, refId);
-					assertRefOwnership(ref, repoId);
-					await store.delete(refId);
-					return true;
-				}
-			);
-		} catch (cause: unknown) {
-			throwVersionControlDatabaseFailure(log, 'ref', 'delete', refId, repoId, cause);
-		}
-
-		if (!deleted) return false;
-		log.debug('reference deleted', { repoId, refId });
-		return true;
-	}
 }
 
 /** Validates a reference row read from IndexedDB. */
-function parseRef(storedRow: unknown, repoId: string, refId: string): DbRef {
-	const parsed = v.safeParse(DbRefSchema, storedRow);
+function parseRef(storedRow: unknown, repoId: string, refId: string): Ref {
+	const parsed = v.safeParse(RefSchema, storedRow);
 	if (!parsed.success) {
 		const error = new RefCorruptError(refId, repoId, parsed.issues);
 		log.error('corrupt reference row', { err: error, repoId, refId });
@@ -252,8 +237,8 @@ function parseRef(storedRow: unknown, repoId: string, refId: string): DbRef {
 }
 
 /** Ensures the reference belongs to the requested repository. */
-function assertRefOwnership(ref: DbRef, repoId: string): void {
+function assertRefOwnership(ref: Ref, repoId: string): void {
 	if (ref.repoId !== repoId) {
-		throw reportVersionControlOwnershipFailure(log, 'ref', ref.id, repoId, ref.repoId);
+		throw reportVersionControlOwnershipFailure(log, ref.id, repoId, ref.repoId);
 	}
 }

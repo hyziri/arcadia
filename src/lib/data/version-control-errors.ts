@@ -9,7 +9,7 @@ import type { Logger } from '#lib/logger';
 export type VersionControlResource = 'repo' | 'ref' | 'commit';
 
 /** Persistence operations supported by version-control repositories. */
-export type VersionControlOperation = 'create' | 'read' | 'update' | 'delete';
+export type VersionControlOperation = 'create' | 'read' | 'update';
 
 /** Indicates that an IndexedDB operation on a version-control store failed. */
 export class VersionControlDatabaseError extends AppError {
@@ -35,23 +35,17 @@ export class VersionControlDatabaseError extends AppError {
 	}
 }
 
-/** Indicates that a resource ID was accessed through the wrong repository. */
+/** Indicates that a reference ID was accessed through the wrong repository. */
 export class VersionControlOwnershipError extends AppError {
 	readonly kind = 'version_control_ownership';
-	readonly resource: 'ref' | 'commit';
+	readonly resource = 'ref';
 	readonly resourceId: string;
 	readonly expectedRepoId: string;
 	readonly actualRepoId: string;
 
 	/** Creates an error describing a repository ownership mismatch. */
-	constructor(
-		resource: 'ref' | 'commit',
-		resourceId: string,
-		expectedRepoId: string,
-		actualRepoId: string
-	) {
-		super(`${resource} ${resourceId} does not belong to repository ${expectedRepoId}`);
-		this.resource = resource;
+	constructor(resourceId: string, expectedRepoId: string, actualRepoId: string) {
+		super(`ref ${resourceId} does not belong to repository ${expectedRepoId}`);
 		this.resourceId = resourceId;
 		this.expectedRepoId = expectedRepoId;
 		this.actualRepoId = actualRepoId;
@@ -103,21 +97,15 @@ export function reportVersionControlDatabaseFailure(
 	return error;
 }
 
-/** Logs and creates an ownership error at the repository boundary. */
+/** Logs and creates a reference ownership error at the repository boundary. */
 export function reportVersionControlOwnershipFailure(
 	logger: Logger,
-	resource: 'ref' | 'commit',
 	resourceId: string,
 	expectedRepoId: string,
 	actualRepoId: string
 ): VersionControlOwnershipError {
-	const error = new VersionControlOwnershipError(
-		resource,
-		resourceId,
-		expectedRepoId,
-		actualRepoId
-	);
-	logger.error(`version-control ${resource} ownership mismatch`, {
+	const error = new VersionControlOwnershipError(resourceId, expectedRepoId, actualRepoId);
+	logger.error('version-control ref ownership mismatch', {
 		err: error,
 		resourceId,
 		expectedRepoId,

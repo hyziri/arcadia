@@ -42,12 +42,10 @@ export interface ArcadiaDbSchema extends DBSchema {
 		key: string;
 		value: Commit;
 		indexes: {
-			/** Lists commits belonging to a repository. */
-			'by-repo': string;
 			/** Finds child commits; root commits with no parent are not indexed. */
-			'by-repo-parent': [string, string];
-			/** Finds alternate commits; commits without an alternate target are not indexed. */
-			'by-repo-alternate': [string, string];
+			'by-parent': string;
+			/** Finds commits that use another commit as an alternate. */
+			'by-alternate': string;
 		};
 	};
 }

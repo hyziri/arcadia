@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 
-	import { type ProviderConfig } from '../../model/index.ts';
-	import { SettingsService } from '../../service/index.ts';
+	import { getDatabase } from '#lib/db';
+	import { type ProviderConfig } from '#lib/model';
+	import { SettingsService } from '#lib/service';
 
 	const SAVE_DEBOUNCE_MS = 500;
-	const settingsService = new SettingsService();
+	let settingsService: SettingsService | undefined;
+	let isSettingsAvailable = $state(false);
 
 	type ProviderConfigField = keyof ProviderConfig;
 
@@ -33,6 +35,11 @@
 
 	async function loadProviderConfig(): Promise<void> {
 		try {
+			const database = await getDatabase();
+			if (isDestroyed) return;
+
+			settingsService = new SettingsService(database);
+			isSettingsAvailable = true;
 			const savedConfig = await settingsService.getProviderConfig();
 			if (isDestroyed) return;
 
@@ -83,6 +90,8 @@
 	}
 
 	function persistProviderConfig(config: ProviderConfig, version: number): void {
+		if (settingsService === undefined) return;
+
 		const persistence = isProviderConfigEmpty(config)
 			? settingsService.deleteProviderConfig()
 			: settingsService.saveProviderConfig(config);
@@ -118,7 +127,7 @@
 					name={field.key}
 					placeholder={field.placeholder}
 					value={providerConfig[field.key]}
-					disabled={isLoading}
+					disabled={isLoading || !isSettingsAvailable}
 					oninput={(event) => updateProviderConfig(field.key, event.currentTarget.value)}
 					onkeydown={(event) => {
 						if (event.key !== 'Enter') return;

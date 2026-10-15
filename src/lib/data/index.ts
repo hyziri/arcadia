@@ -7,23 +7,11 @@ export {
 	SettingsRepo
 } from './settings';
 export type { DbSetting } from './settings';
-export {
-	CommitCorruptError,
-	CommitRepo,
-	CreateDbCommitParamSchema,
-	DbCommitSchema
-} from './commit';
-export type { CreateDbCommitParam, DbCommit } from './commit';
-export {
-	CreateDbRefParamSchema,
-	DbRefSchema,
-	RefCorruptError,
-	RefRepo,
-	UpdateDbRefParamSchema
-} from './ref';
-export type { CreateDbRefParam, DbRef, UpdateDbRefParam } from './ref';
-export { DbRepoSchema, RepoCorruptError, RepoRepo } from './repo';
-export type { DbRepo } from './repo';
+export { CommitCorruptError, CommitRepo, CreateDbCommitParamSchema } from './commit';
+export type { CreateDbCommitParam } from './commit';
+export { CreateDbRefParamSchema, RefCorruptError, RefRepo, UpdateDbRefParamSchema } from './ref';
+export type { CreateDbRefParam, UpdateDbRefParam } from './ref';
+export { RepoCorruptError, RepoRepo } from './repo';
 export {
 	VersionControlDatabaseError,
 	VersionControlOwnershipError
