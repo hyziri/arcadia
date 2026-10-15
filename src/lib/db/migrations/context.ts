@@ -5,7 +5,8 @@ import type { IDBPDatabase, IDBPTransaction } from 'idb';
 import type { ArcadiaDbSchema } from '../schema';
 
 /** Store names available on the database during a version-change transaction. */
-type DatabaseStoreName = 'settings' | 'repos' | 'refs' | 'commits';
+type DatabaseStoreName =
+	'settings' | 'repos' | 'refs' | 'commits' | 'garbageJobs' | 'garbageJobItems';
 
 /** Database and active transaction passed to each schema migration. */
 export interface MigrationContext {

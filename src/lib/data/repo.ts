@@ -100,6 +100,29 @@ export class RepoRepo {
 		if (storedRow === undefined) return undefined;
 		return parseRepo(storedRow, repoId);
 	}
+
+	/**
+	 * Deletes a previously validated repository within a caller-owned multi-store transaction.
+	 *
+	 * @param repository - The repository validated in the active transaction.
+	 * @param transaction - The transaction that also removes refs and enqueues collection.
+	 * @returns `true` after the repository is deleted.
+	 * @throws {VersionControlDatabaseError} when deletion fails.
+	 */
+	protected async _delete(
+		repository: Repo,
+		transaction: ArcadiaTransaction<'readwrite'>
+	): Promise<boolean> {
+		log.trace('delete enter', { repoId: repository.id });
+		try {
+			await transaction.objectStore('repos').delete(repository.id);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'repo', 'delete', repository.id, undefined, cause);
+		}
+
+		log.debug('repository row deleted', { repoId: repository.id });
+		return true;
+	}
 }
 
 /** Validates a repository row read from IndexedDB. */

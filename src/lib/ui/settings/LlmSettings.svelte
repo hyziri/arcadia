@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 
-	import { getDatabase } from '#lib/db';
 	import { type ProviderConfig } from '#lib/model';
-	import { SettingsService } from '#lib/service';
+	import { type SettingsService } from '#lib/service';
+	import { appState } from '#lib/state';
 
 	const SAVE_DEBOUNCE_MS = 500;
 	let settingsService: SettingsService | undefined;
@@ -35,10 +35,9 @@
 
 	async function loadProviderConfig(): Promise<void> {
 		try {
-			const database = await getDatabase();
+			settingsService = await appState.getSettingsService();
 			if (isDestroyed) return;
 
-			settingsService = new SettingsService(database);
 			isSettingsAvailable = true;
 			const savedConfig = await settingsService.getProviderConfig();
 			if (isDestroyed) return;

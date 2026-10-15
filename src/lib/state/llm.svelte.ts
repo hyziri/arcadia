@@ -19,11 +19,11 @@ import {
 	type OpenAiCredentials,
 	type OpenAiMessageRequest
 } from '#lib/api';
-import { getDatabase } from '#lib/db';
 import { AppError } from '#lib/error';
+import type { ChatMessage } from '#lib/model';
 import { getLogger } from '#lib/logger.ts';
-import { SettingsService } from '#lib/service';
-import type { ChatMessage, ProviderConfig } from '#lib/model';
+
+import { appState } from './app.svelte.ts';
 
 /** Identifies which required LLM configuration value is missing. */
 export type LlmConfigurationIssue = 'provider' | 'endpoint';
@@ -49,17 +49,6 @@ const log = getLogger('state/llm');
 
 /** Adapts configured chat history to the OpenAI-compatible streaming API. */
 export class LlmProvider {
-	private config: ProviderConfig | null = null;
-	private _settingsService: SettingsService | undefined;
-
-	/** Creates a provider that reads persisted settings before each request.
-	 *
-	 * @param settingsService - The service used to load the current provider configuration.
-	 */
-	constructor(settingsService?: SettingsService) {
-		this._settingsService = settingsService;
-	}
-
 	/**
 	 * Streams completion chunks for the supplied conversation history.
 	 *
@@ -72,19 +61,17 @@ export class LlmProvider {
 		messages: ChatMessage[],
 		abortSignal?: AbortSignal
 	): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
-		if (this._settingsService === undefined) {
-			this._settingsService = new SettingsService(await getDatabase());
-		}
-		this.config = (await this._settingsService.getProviderConfig()) ?? null;
-		if (this.config === null) this._throwConfigurationError('provider');
+		const settingsService = await appState.getSettingsService();
+		const config = await settingsService.getProviderConfig();
+		if (config === undefined) this._throwConfigurationError('provider');
 
-		const endpoint = this.config.endpoint.trim();
+		const endpoint = config.endpoint.trim();
 		if (endpoint === '') this._throwConfigurationError('endpoint');
 
 		const credentials: OpenAiCredentials = {
 			endpoint,
-			...(this.config.model.trim() === '' ? {} : { model: this.config.model }),
-			...(this.config.apiKey.trim() === '' ? {} : { apiKey: this.config.apiKey })
+			...(config.model.trim() === '' ? {} : { model: config.model }),
+			...(config.apiKey.trim() === '' ? {} : { apiKey: config.apiKey })
 		};
 
 		yield* streamOpenAiChat(credentials, this._prepareMessages(messages), abortSignal);

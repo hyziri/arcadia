@@ -6,11 +6,10 @@
  *
  * @example
  * ```ts
- * import { getDatabase } from '#lib/db';
- * import { VersionControlService } from '#lib/service';
+ * import { appState } from '#lib/state';
  *
- * const database = await getDatabase();
- * const versionControl = new VersionControlService(database);
+ * const database = await appState.initialize();
+ * const versionControl = await appState.getVersionControlService();
  * const prepared = await versionControl.prepareCommit({
  * 	parentCommitId: null,
  * 	alternateOfCommitId: null,
@@ -37,6 +36,8 @@ import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
 import type { Commit, Ref, Repo, RepoKind } from '#lib/model';
+
+import type { GarbageCollectionService } from './garbage-collection';
 
 const COMMIT_CONTENT_FORMAT = 'arcadia/version-control-commit/v2';
 const log = getLogger('service/version-control');
@@ -109,19 +110,39 @@ export class VersionControlCommitPreparationError extends AppError {
 	}
 }
 
+/** Exposes repository deletion only to the version-control orchestrator. */
+class MutableRepoRepo extends RepoRepo {
+	delete(repository: Repo, transaction: ArcadiaTransaction<'readwrite'>): Promise<boolean> {
+		return this._delete(repository, transaction);
+	}
+}
+
+/** Exposes ref deletion only to the version-control orchestrator. */
+class MutableRefRepo extends RefRepo {
+	delete(ref: Ref, transaction: ArcadiaTransaction<'readwrite'>): Promise<boolean> {
+		return this._delete(ref, transaction);
+	}
+}
+
 /** Coordinates version-control repositories using an already-open database connection. */
 export class VersionControlService {
 	private readonly _db: Database;
-	private readonly _repoRepo: RepoRepo;
-	private readonly _refRepo: RefRepo;
+	private readonly _repoRepo: MutableRepoRepo;
+	private readonly _refRepo: MutableRefRepo;
 	private readonly _commitRepo: CommitRepo;
+	private readonly _garbageCollectionService: GarbageCollectionService;
 
-	/** Creates a service and its repositories backed by the supplied database connection. */
-	constructor(database: Database) {
+	/** Creates a version-control service using the application-owned collector.
+	 *
+	 * @param database - The already-open application database.
+	 * @param garbageCollectionService - The collector shared with application startup recovery.
+	 */
+	constructor(database: Database, garbageCollectionService: GarbageCollectionService) {
 		this._db = database;
-		this._repoRepo = new RepoRepo(database);
-		this._refRepo = new RefRepo(database);
+		this._repoRepo = new MutableRepoRepo(database);
+		this._refRepo = new MutableRefRepo(database);
 		this._commitRepo = new CommitRepo(database);
+		this._garbageCollectionService = garbageCollectionService;
 	}
 
 	/**
@@ -195,6 +216,43 @@ export class VersionControlService {
 	getRepository(repoId: string, transaction?: ArcadiaTransaction): Promise<Repo | undefined> {
 		log.trace('getRepository enter', { repoId });
 		return this._repoRepo.get(repoId, transaction);
+	}
+
+	/**
+	 * Deletes a repository and atomically queues its ref targets for background collection.
+	 *
+	 * @param repoId - The repository to delete.
+	 * @param transaction - Optional caller-owned transaction spanning repositories and GC stores.
+	 * @returns `true` if the repository existed and was queued for deletion, otherwise `false`.
+	 * @throws {RepoCorruptError|RefCorruptError|VersionControlOwnershipError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
+	 */
+	async deleteRepository(
+		repoId: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<boolean> {
+		log.trace('deleteRepository enter', { repoId });
+		const deleted = await withTransaction(
+			this._db,
+			['repos', 'refs', 'garbageJobs', 'garbageJobItems'],
+			'readwrite',
+			transaction,
+			async (tx) => {
+				const repository = await this._repoRepo.get(repoId, tx);
+				if (repository === undefined) return false;
+				const refs = await this._refRepo.getAllByRepo(repoId, tx);
+				await this._garbageCollectionService.enqueue(
+					repoId,
+					'repository-deleted',
+					refs.map((ref) => ref.targetCommitId),
+					tx
+				);
+				await Promise.all(refs.map((ref) => this._refRepo.delete(ref, tx)));
+				await this._repoRepo.delete(repository, tx);
+				return true;
+			}
+		);
+
+		return deleted;
 	}
 
 	/**
@@ -340,9 +398,9 @@ export class VersionControlService {
 	 * @param targetCommitId - The new target commit ID, if moving the ref.
 	 * @param transaction - Optional caller-owned transaction spanning the related stores.
 	 * @returns The updated reference, or `undefined` if it does not exist.
-	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|CommitCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation, linked-resource checks, or persistence fails.
+	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|CommitCorruptError|VersionControlOwnershipError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation, linked-resource checks, or persistence fails.
 	 */
-	updateRef(
+	async updateRef(
 		repoId: string,
 		refId: string,
 		name?: string,
@@ -355,19 +413,69 @@ export class VersionControlService {
 			...(targetCommitId === undefined ? {} : { targetCommitId })
 		});
 
-		return withTransaction(
+		const updated = await withTransaction(
 			this._db,
-			['repos', 'refs', 'commits'],
+			['repos', 'refs', 'commits', 'garbageJobs', 'garbageJobItems'],
 			'readwrite',
 			transaction,
 			async (tx) => {
 				await this._requireRepository(repoId, tx);
-				return this._refRepo.update(repoId, refId, input, tx, async (currentRef, activeTx) => {
-					const target = input.targetCommitId ?? currentRef.targetCommitId;
-					await this._requireCommit(target, activeTx);
-				});
+				const currentRef = await this._refRepo.get(repoId, refId, tx);
+				if (currentRef === undefined) return undefined;
+
+				const target = input.targetCommitId ?? currentRef.targetCommitId;
+				await this._requireCommit(target, tx);
+				if (target !== currentRef.targetCommitId) {
+					await this._garbageCollectionService.enqueue(
+						repoId,
+						'reference-moved',
+						[currentRef.targetCommitId],
+						tx
+					);
+				}
+				return this._refRepo.update(repoId, refId, input, tx);
 			}
 		);
+
+		return updated;
+	}
+
+	/**
+	 * Deletes a reference and atomically queues its target for background collection.
+	 *
+	 * @param repoId - The owning repository ID.
+	 * @param refId - The reference ID to delete.
+	 * @param transaction - Optional caller-owned transaction spanning refs and GC stores.
+	 * @returns `true` if the reference existed and was queued for deletion, otherwise `false`.
+	 * @throws {RepoCorruptError|RefCorruptError|VersionControlOwnershipError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
+	 */
+	async deleteRef(
+		repoId: string,
+		refId: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<boolean> {
+		log.trace('deleteRef enter', { repoId, refId });
+		const deleted = await withTransaction(
+			this._db,
+			['repos', 'refs', 'garbageJobs', 'garbageJobItems'],
+			'readwrite',
+			transaction,
+			async (tx) => {
+				if ((await this._repoRepo.get(repoId, tx)) === undefined) return false;
+				const ref = await this._refRepo.get(repoId, refId, tx);
+				if (ref === undefined) return false;
+				await this._garbageCollectionService.enqueue(
+					repoId,
+					'reference-deleted',
+					[ref.targetCommitId],
+					tx
+				);
+				await this._refRepo.delete(ref, tx);
+				return true;
+			}
+		);
+
+		return deleted;
 	}
 
 	/** Requires the requested repository to exist within the active transaction. */

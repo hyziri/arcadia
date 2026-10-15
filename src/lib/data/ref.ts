@@ -174,25 +174,38 @@ export class RefRepo {
 	}
 
 	/**
+	 * Counts refs targeting a commit, including refs from every repository.
+	 *
+	 * @param commitId - The target commit ID to count.
+	 * @param transaction - The active transaction containing the refs store.
+	 * @returns The indexed ref count.
+	 * @throws {VersionControlDatabaseError|TransactionScopeError} when the index cannot be queried.
+	 */
+	async countByTargetCommit(commitId: string, transaction: ArcadiaTransaction): Promise<number> {
+		try {
+			return await withTransaction(this._db, ['refs'], 'readonly', transaction, async (tx) =>
+				tx.objectStore('refs').index('by-target-commit').count(IDBKeyRange.only(commitId))
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'ref', 'read', commitId, undefined, cause);
+		}
+	}
+
+	/**
 	 * Updates a reference's name or target commit.
 	 *
 	 * @param repoId - The expected owning repository ID.
 	 * @param refId - The reference ID to update.
 	 * @param updateRefParam - The mutable reference fields to apply.
 	 * @param transaction - Optional caller-owned transaction spanning repository operations.
-	 * @param validateUpdate - Optional service-level invariant check run in the transaction before writing; it must not await non-IndexedDB work.
 	 * @returns The updated reference, or `undefined` if it does not exist.
-	 * @throws {AppError|v.ValiError} when validation or persistence fails.
+	 * @throws {v.ValiError|RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
 	async update(
 		repoId: string,
 		refId: string,
 		updateRefParam: UpdateDbRefParam,
-		transaction?: ArcadiaTransaction<'readwrite'>,
-		validateUpdate?: (
-			currentRef: Ref,
-			transaction: ArcadiaTransaction<'readwrite'>
-		) => Promise<void>
+		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Ref | undefined> {
 		log.trace('update enter', { repoId, refId });
 
@@ -206,7 +219,6 @@ export class RefRepo {
 
 				const currentRef = parseRef(storedRow, repoId, refId);
 				assertRefOwnership(currentRef, repoId);
-				await validateUpdate?.(currentRef, tx);
 				const updatedRef = v.parse(RefSchema, {
 					...currentRef,
 					...input,
@@ -222,6 +234,29 @@ export class RefRepo {
 		if (updated === undefined) return undefined;
 		log.debug('reference updated', { repoId, refId });
 		return updated;
+	}
+
+	/**
+	 * Deletes a previously validated ref within a caller-owned transaction.
+	 *
+	 * @param ref - The ref validated in the active transaction.
+	 * @param transaction - The transaction that also updates the GC queue.
+	 * @returns `true` after the ref is deleted.
+	 * @throws {VersionControlDatabaseError} when deletion fails.
+	 */
+	protected async _delete(
+		ref: Ref,
+		transaction: ArcadiaTransaction<'readwrite'>
+	): Promise<boolean> {
+		log.trace('delete enter', { repoId: ref.repoId, refId: ref.id });
+		try {
+			await transaction.objectStore('refs').delete(ref.id);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'ref', 'delete', ref.id, ref.repoId, cause);
+		}
+
+		log.debug('reference deleted', { repoId: ref.repoId, refId: ref.id });
+		return true;
 	}
 }
 

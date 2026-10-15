@@ -12,6 +12,7 @@ export type { CreateDbCommitParam } from './commit';
 export { CreateDbRefParamSchema, RefCorruptError, RefRepo, UpdateDbRefParamSchema } from './ref';
 export type { CreateDbRefParam, UpdateDbRefParam } from './ref';
 export { RepoCorruptError, RepoRepo } from './repo';
+
 export {
 	VersionControlDatabaseError,
 	VersionControlOwnershipError

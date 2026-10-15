@@ -117,6 +117,65 @@ export class CommitRepo {
 		if (storedRow === undefined) return undefined;
 		return parseCommit(storedRow, commitId);
 	}
+
+	/**
+	 * Counts commits that use the requested commit as their parent.
+	 *
+	 * @param commitId - The commit whose children should be counted.
+	 * @param transaction - The active transaction containing the commits store.
+	 * @returns The indexed child count.
+	 * @throws {VersionControlDatabaseError|TransactionScopeError} when the index cannot be queried.
+	 */
+	async countByParent(commitId: string, transaction: ArcadiaTransaction): Promise<number> {
+		try {
+			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) =>
+				tx.objectStore('commits').index('by-parent').count(IDBKeyRange.only(commitId))
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'read', commitId, undefined, cause);
+		}
+	}
+
+	/**
+	 * Counts commits that use the requested commit as their alternate.
+	 *
+	 * @param commitId - The commit whose alternate users should be counted.
+	 * @param transaction - The active transaction containing the commits store.
+	 * @returns The indexed alternate count.
+	 * @throws {VersionControlDatabaseError|TransactionScopeError} when the index cannot be queried.
+	 */
+	async countByAlternate(commitId: string, transaction: ArcadiaTransaction): Promise<number> {
+		try {
+			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) =>
+				tx.objectStore('commits').index('by-alternate').count(IDBKeyRange.only(commitId))
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'read', commitId, undefined, cause);
+		}
+	}
+
+	/**
+	 * Deletes one commit within a caller-owned transaction after the service checks its liveness.
+	 *
+	 * @param commit - The commit validated in the active transaction.
+	 * @param transaction - The transaction containing liveness checks and collection state.
+	 * @returns `true` after the commit is deleted.
+	 * @throws {VersionControlDatabaseError|TransactionScopeError} when deletion fails.
+	 */
+	protected async _delete(
+		commit: Commit,
+		transaction: ArcadiaTransaction<'readwrite'>
+	): Promise<boolean> {
+		log.trace('delete enter', { commitId: commit.id });
+		try {
+			await transaction.objectStore('commits').delete(commit.id);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'delete', commit.id, undefined, cause);
+		}
+
+		log.debug('commit deleted', { commitId: commit.id });
+		return true;
+	}
 }
 
 /** Validates a commit row read from IndexedDB. */

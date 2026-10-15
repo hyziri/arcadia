@@ -9,7 +9,7 @@ import type { Logger } from '#lib/logger';
 export type VersionControlResource = 'repo' | 'ref' | 'commit';
 
 /** Persistence operations supported by version-control repositories. */
-export type VersionControlOperation = 'create' | 'read' | 'update';
+export type VersionControlOperation = 'create' | 'read' | 'update' | 'delete';
 
 /** Indicates that an IndexedDB operation on a version-control store failed. */
 export class VersionControlDatabaseError extends AppError {

@@ -14,6 +14,7 @@
 import { migrateToV1 } from './001-add-settings-store';
 import { migrateToV2 } from './002-add-version-control-stores';
 import { migrateToV3 } from './003-share-commits-across-repositories';
+import { migrateToV4 } from './004-add-garbage-collection-stores';
 import { type MigrationContext } from './context';
 
 /** A schema change associated with the database version it produces. */
@@ -29,7 +30,8 @@ interface Migration {
 const migrations: readonly Migration[] = [
 	{ version: 1, migrate: migrateToV1 },
 	{ version: 2, migrate: migrateToV2 },
-	{ version: 3, migrate: migrateToV3 }
+	{ version: 3, migrate: migrateToV3 },
+	{ version: 4, migrate: migrateToV4 }
 ];
 
 /**
