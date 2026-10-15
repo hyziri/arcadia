@@ -1,3 +1,4 @@
+export { appState, AppState } from './app.svelte.ts';
 export { ChatSession } from './chat.svelte.ts';
 export { LlmConfigurationError, LlmProvider, type LlmConfigurationIssue } from './llm.svelte.ts';
 export { getDialogContext, setDialogContext, type DialogController } from './dialog';

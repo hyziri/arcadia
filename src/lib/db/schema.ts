@@ -2,6 +2,8 @@
 
 import type { DBSchema } from 'idb';
 
+import type { Commit, GarbageJob, GarbageJobItem, Ref, Repo } from '#lib/model';
+
 /** IndexedDB stores and row shapes persisted by Arcadia. */
 export interface ArcadiaDbSchema extends DBSchema {
 	/** Application settings keyed by setting name. */
@@ -12,5 +14,58 @@ export interface ArcadiaDbSchema extends DBSchema {
 			value: string;
 		};
 		indexes: Record<string, never>;
+	};
+
+	/** Version-control repositories. */
+	repos: {
+		key: string;
+		value: Repo;
+		indexes: Record<string, never>;
+	};
+
+	/** Named branch references within repositories. */
+	refs: {
+		key: string;
+		value: Ref;
+		indexes: {
+			/** Lists refs belonging to a repository. */
+			'by-repo': string;
+			/** Uniquely identifies a ref name within a repository. */
+			'by-repo-name': [string, string];
+			/** Finds refs targeting a commit. */
+			'by-target-commit': string;
+		};
+	};
+
+	/** Immutable version-control commits. */
+	commits: {
+		key: string;
+		value: Commit;
+		indexes: {
+			/** Finds child commits; root commits with no parent are not indexed. */
+			'by-parent': string;
+			/** Finds commits that use another commit as an alternate. */
+			'by-alternate': string;
+		};
+	};
+
+	/** Durable garbage-collection jobs. */
+	garbageJobs: {
+		key: string;
+		value: GarbageJob;
+		indexes: {
+			/** Finds jobs that still need processing. */
+			'by-status': GarbageJob['status'];
+		};
+	};
+
+	/** Resumable per-commit work for garbage-collection jobs. */
+	garbageJobItems: {
+		key: [string, string];
+		value: GarbageJobItem;
+		indexes: {
+			/** Finds candidate items in a requested state for one job. */
+			'by-job-state': [string, GarbageJobItem['state']];
+		};
 	};
 }

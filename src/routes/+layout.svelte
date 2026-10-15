@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 
 	import { Dialog, Header, Settings, Toast as ToastComponent } from '#lib/ui';
 	import favicon from '#lib/assets/favicon.svg';
 	import {
+		appState,
 		setDialogContext,
 		setToastContext,
 		type DialogController,
@@ -100,6 +102,10 @@
 
 	setDialogContext(dialogController);
 	setToastContext(toastController);
+
+	onMount(() => {
+		void appState.initialize().catch(() => undefined);
+	});
 </script>
 
 <svelte:head>

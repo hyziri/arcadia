@@ -6,19 +6,22 @@
  *
  * @example
  * ```ts
+ * import { getDatabase } from '#lib/db';
  * import { SettingsService } from '#lib/service';
  *
- * const settingsService = new SettingsService();
+ * const database = await getDatabase();
+ * const settingsService = new SettingsService(database);
  * const providerConfig = await settingsService.getProviderConfig();
  * ```
  */
 
 import * as v from 'valibot';
 
-import { SettingsRepo } from '../data/index.ts';
-import { AppError } from '../error.ts';
-import { getLogger } from '../logger.ts';
-import { ProviderConfigSchema, type ProviderConfig } from '../model/index.ts';
+import type { Database } from '#lib/db';
+import { SettingsRepo } from '#lib/data';
+import { AppError } from '#lib/error';
+import { getLogger } from '#lib/logger';
+import { ProviderConfigSchema, type ProviderConfig } from '#lib/model';
 
 /** IndexedDB key used for the serialized LLM provider configuration. */
 const PROVIDER_CONFIG_SETTING_KEY = 'llm.providerConfig';
@@ -53,9 +56,9 @@ export class SettingsConfigCorruptError extends AppError {
 export class SettingsService {
 	private readonly _settingsRepo: SettingsRepo;
 
-	/** Creates a settings service backed by the supplied repository. */
-	constructor(settingsRepo: SettingsRepo = new SettingsRepo()) {
-		this._settingsRepo = settingsRepo;
+	/** Creates a settings service backed by the supplied database connection. */
+	constructor(database: Database) {
+		this._settingsRepo = new SettingsRepo(database);
 	}
 
 	/**
