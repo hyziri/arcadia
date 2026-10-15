@@ -13,7 +13,7 @@ import {
 } from './garbage-errors';
 
 /** Logger scoped to garbage-job persistence. */
-const log = getLogger('data/garbage-job');
+const log = getLogger('data/version-control/garbage-job');
 
 /** Provides validated operations for durable garbage-collection jobs. */
 export class GarbageJobRepo {

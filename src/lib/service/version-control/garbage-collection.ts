@@ -18,12 +18,12 @@ import { AppError, OperationTimeoutError } from '#lib/error';
 import { getLogger } from '#lib/logger';
 import type { Commit, GarbageJob, GarbageJobReason } from '#lib/model';
 
-import { GarbageCollectionDatabaseError } from '../data/garbage-errors';
-import { GarbageItemRepo } from '../data/garbage-item';
-import { GarbageJobRepo } from '../data/garbage-job';
+import { GarbageCollectionDatabaseError } from '../../data/version-control/garbage-errors';
+import { GarbageItemRepo } from '../../data/version-control/garbage-item';
+import { GarbageJobRepo } from '../../data/version-control/garbage-job';
 
 /** Logger scoped to background garbage collection. */
-const log = getLogger('service/garbage-collection');
+const log = getLogger('service/version-control/garbage-collection');
 const RETRY_DELAY_MS = 5_000;
 
 /** Exposes commit deletion only to the collector after it verifies global liveness. */

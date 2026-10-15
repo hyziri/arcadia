@@ -25,7 +25,7 @@ import { RepoKindSchema, RepoSchema, type Repo, type RepoKind } from '#lib/model
 import { throwVersionControlDatabaseFailure } from './version-control-errors';
 
 /** Logger scoped to repository persistence and validation. */
-const log = getLogger('data/repo');
+const log = getLogger('data/version-control/repo');
 
 /** Indicates that a persisted repository row does not match its schema. */
 export class RepoCorruptError extends AppError {

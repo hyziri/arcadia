@@ -4,7 +4,7 @@ import { getDatabase, type Database, type DatabasePromise } from '#lib/db';
 import { getLogger } from '#lib/logger';
 import { SettingsService, VersionControlService } from '#lib/service';
 
-import { GarbageCollectionService } from '../service/garbage-collection';
+import { GarbageCollectionService } from '../service/version-control/garbage-collection';
 
 /** Logger scoped to shared application state initialization. */
 const log = getLogger('state/app');

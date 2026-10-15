@@ -41,7 +41,7 @@ export type CreateDbRefParam = v.InferOutput<typeof CreateDbRefParamSchema>;
 export type UpdateDbRefParam = v.InferOutput<typeof UpdateDbRefParamSchema>;
 
 /** Logger scoped to reference persistence and validation. */
-const log = getLogger('data/ref');
+const log = getLogger('data/version-control/ref');
 
 /** Indicates that a persisted reference row does not match its schema. */
 export class RefCorruptError extends AppError {

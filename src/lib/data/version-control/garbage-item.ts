@@ -13,7 +13,7 @@ import {
 } from './garbage-errors';
 
 /** Logger scoped to garbage-collection work-item persistence. */
-const log = getLogger('data/garbage-item');
+const log = getLogger('data/version-control/garbage-item');
 
 /** Provides validated operations for per-commit garbage-collection work items. */
 export class GarbageItemRepo {

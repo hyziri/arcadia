@@ -30,7 +30,7 @@ export const CreateDbCommitParamSchema = v.omit(CommitSchema, ['id', 'repoId', '
 export type CreateDbCommitParam = v.InferOutput<typeof CreateDbCommitParamSchema>;
 
 /** Logger scoped to commit persistence and validation. */
-const log = getLogger('data/commit');
+const log = getLogger('data/version-control/commit');
 
 /** Indicates that a persisted commit row does not match its schema. */
 export class CommitCorruptError extends AppError {
