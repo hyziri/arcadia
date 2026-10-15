@@ -10,13 +10,13 @@ import * as v from 'valibot';
 export const ChatMessageSenderSchema = v.picklist(['user', 'assistant']);
 
 /** Validates the sender and content stored for a chat message. */
-export const ChatMessageSchema = v.object({
+export const ChatMessageSchema = v.strictObject({
 	sender: ChatMessageSenderSchema,
 	content: v.string()
 });
 
 /** Validates the tagged chat-message payload stored in a commit. */
-export const ChatCommitDataSchema = v.object({
+export const ChatCommitDataSchema = v.strictObject({
 	type: v.literal('chat-message'),
 	message: ChatMessageSchema
 });
@@ -25,14 +25,14 @@ export const ChatCommitDataSchema = v.object({
 export const RepoKindSchema = v.picklist(['chat']);
 
 /** Validates repository identity and creation metadata. */
-export const RepoSchema = v.object({
+export const RepoSchema = v.strictObject({
 	id: v.string(),
 	kind: RepoKindSchema,
 	createdAt: v.number()
 });
 
 /** Validates a named reference to a commit within a repository. */
-export const RefSchema = v.object({
+export const RefSchema = v.strictObject({
 	id: v.string(),
 	repoId: v.string(),
 	name: v.string(),
@@ -45,7 +45,7 @@ export const RefSchema = v.object({
 export const CommitDataSchema = v.variant('type', [ChatCommitDataSchema]);
 
 /** Validates commit identity, ancestry, alternate linkage, and payload. */
-export const CommitSchema = v.object({
+export const CommitSchema = v.strictObject({
 	id: v.string(),
 	repoId: v.string(),
 	parentCommitId: v.nullable(v.string()),

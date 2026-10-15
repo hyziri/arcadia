@@ -1,7 +1,8 @@
 /** Persists and validates application settings in IndexedDB.
  *
  * Settings are stored as string values keyed by setting name. Reads validate persisted rows so
- * malformed data from an older version or manual edits fail with a typed corruption error.
+ * malformed data from an older version or manual edits fail with a typed corruption error. Operations
+ * can join a caller-owned transaction when they need to be atomic with other stores.
  *
  * @example
  * ```ts
@@ -15,12 +16,12 @@
 
 import * as v from 'valibot';
 
-import { getDatabase } from '../db/index.ts';
-import { AppError } from '../error.ts';
-import { getLogger } from '../logger.ts';
+import { getDatabase, withTransaction, type ArcadiaTransaction } from '#lib/db';
+import { AppError } from '#lib/error';
+import { getLogger } from '#lib/logger';
 
 /** Validates the persisted row shape for the settings store. */
-export const DbSettingSchema = v.object({
+export const DbSettingSchema = v.strictObject({
 	key: v.string(),
 	value: v.string()
 });
@@ -82,18 +83,30 @@ export class SettingsRepo {
 	 *
 	 * @param settingKey - The setting name used as the IndexedDB key.
 	 * @param value - The string value to persist.
+	 * @param transaction - Optional caller-owned transaction spanning related persistence operations.
 	 * @returns A promise that resolves when the setting is stored.
-	 * @throws {v.ValiError|SettingsDatabaseError|Error|DOMException} when validation or the IndexedDB write fails.
+	 * @throws {v.ValiError|SettingsDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
-	async set(settingKey: string, value: string): Promise<void> {
+	async set(
+		settingKey: string,
+		value: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<void> {
 		log.trace('set enter', { settingKey });
 
 		const setting = v.parse(DbSettingSchema, { key: settingKey, value });
-		const database = await getDatabase();
 		try {
-			await database.put('settings', setting);
+			await withTransaction(
+				await getDatabase(),
+				['settings'],
+				'readwrite',
+				transaction,
+				async (tx) => {
+					await tx.objectStore('settings').put(setting);
+				}
+			);
 		} catch (cause: unknown) {
-			throw logDatabaseFailure('write', settingKey, cause);
+			throwDatabaseFailure('write', settingKey, cause);
 		}
 
 		log.debug('setting saved', { settingKey });
@@ -103,68 +116,84 @@ export class SettingsRepo {
 	 * Gets one setting by its key.
 	 *
 	 * @param settingKey - The setting name to retrieve.
+	 * @param transaction - Optional caller-owned transaction containing the settings store.
 	 * @returns The validated setting, or `undefined` if it does not exist.
-	 * @throws {SettingsCorruptError|SettingsDatabaseError|Error|DOMException} when the row is corrupt or the IndexedDB read fails.
+	 * @throws {SettingsCorruptError|SettingsDatabaseError|TransactionScopeError|OperationTimeoutError} when the row is corrupt or the read fails.
 	 */
-	async get(settingKey: string): Promise<DbSetting | undefined> {
+	async get(settingKey: string, transaction?: ArcadiaTransaction): Promise<DbSetting | undefined> {
 		log.trace('get enter', { settingKey });
 
-		const database = await getDatabase();
-		let setting: DbSetting | undefined;
+		let storedRow: unknown;
 		try {
-			setting = await database.get('settings', settingKey);
+			storedRow = await withTransaction(
+				await getDatabase(),
+				['settings'],
+				'readonly',
+				transaction,
+				async (tx) => tx.objectStore('settings').get(settingKey)
+			);
 		} catch (cause: unknown) {
-			throw logDatabaseFailure('read', settingKey, cause);
+			throwDatabaseFailure('read', settingKey, cause);
 		}
 
-		if (setting === undefined) {
+		if (storedRow === undefined) {
 			return undefined;
 		}
 
-		return parseSetting(setting);
+		return parseSetting(storedRow);
 	}
 
 	/**
 	 * Deletes one setting by its key.
 	 *
 	 * @param settingKey - The setting name to delete.
+	 * @param transaction - Optional caller-owned transaction spanning related persistence operations.
 	 * @returns A promise that resolves when the setting is deleted.
-	 * @throws {SettingsDatabaseError|Error|DOMException} when the IndexedDB write fails.
+	 * @throws {SettingsDatabaseError|TransactionScopeError|OperationTimeoutError} when deletion fails.
 	 */
-	async delete(settingKey: string): Promise<void> {
+	async delete(settingKey: string, transaction?: ArcadiaTransaction<'readwrite'>): Promise<void> {
 		log.trace('delete enter', { settingKey });
 
-		const database = await getDatabase();
 		try {
-			await database.delete('settings', settingKey);
+			await withTransaction(
+				await getDatabase(),
+				['settings'],
+				'readwrite',
+				transaction,
+				async (tx) => {
+					await tx.objectStore('settings').delete(settingKey);
+				}
+			);
 		} catch (cause: unknown) {
-			throw logDatabaseFailure('delete', settingKey, cause);
+			throwDatabaseFailure('delete', settingKey, cause);
 		}
 
 		log.debug('setting deleted', { settingKey });
 	}
 }
 
-/** Wraps and logs an IndexedDB operation failure at the repository boundary. */
-function logDatabaseFailure(
+/** Preserves typed errors and wraps/logs other failures at the repository boundary. */
+function throwDatabaseFailure(
 	operation: 'read' | 'write' | 'delete',
 	settingKey: string | undefined,
 	cause: unknown
-): SettingsDatabaseError {
+): never {
+	if (cause instanceof AppError) throw cause;
+
 	const error = new SettingsDatabaseError(operation, settingKey, { cause });
 	log.error(`settings ${operation} failed`, {
 		err: error,
 		...(settingKey === undefined ? {} : { settingKey })
 	});
-	return error;
+	throw error;
 }
 
 /** Validates a row read from IndexedDB and reports corruption at the repository boundary. */
-function parseSetting(candidate: unknown): DbSetting {
-	const parsed = v.safeParse(DbSettingSchema, candidate);
+function parseSetting(storedRow: unknown): DbSetting {
+	const parsed = v.safeParse(DbSettingSchema, storedRow);
 
 	if (!parsed.success) {
-		const settingKey = getSettingKey(candidate);
+		const settingKey = getSettingKey(storedRow);
 		const error = new SettingsCorruptError(settingKey, parsed.issues);
 
 		log.error('corrupt settings row', {
@@ -179,10 +208,10 @@ function parseSetting(candidate: unknown): DbSetting {
 }
 
 /** Extracts a usable key from an unknown persisted row for corruption diagnostics. */
-function getSettingKey(candidate: unknown): string | undefined {
-	if (typeof candidate !== 'object' || candidate === null || !('key' in candidate)) {
+function getSettingKey(storedRow: unknown): string | undefined {
+	if (typeof storedRow !== 'object' || storedRow === null || !('key' in storedRow)) {
 		return undefined;
 	}
 
-	return typeof candidate.key === 'string' ? candidate.key : undefined;
+	return typeof storedRow.key === 'string' ? storedRow.key : undefined;
 }

@@ -40,3 +40,17 @@ export class AppError extends Error {
 		Object.setPrototypeOf(this, new.target.prototype);
 	}
 }
+
+/** Indicates that an asynchronous application operation exceeded its deadline. */
+export class OperationTimeoutError extends AppError {
+	readonly kind = 'operation_timeout';
+	readonly operation: string;
+	readonly timeoutMs: number;
+
+	/** Creates an error describing an operation that exceeded its deadline. */
+	constructor(operation: string, timeoutMs: number) {
+		super(`Operation timed out: ${operation} (${timeoutMs}ms)`);
+		this.operation = operation;
+		this.timeoutMs = timeoutMs;
+	}
+}
