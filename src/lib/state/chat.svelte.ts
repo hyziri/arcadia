@@ -8,8 +8,7 @@
  * ```ts
  * import { appState, ChatSession } from '#lib/state';
  *
- * const llmService = await appState.getLlmService();
- * const chat = new ChatSession(llmService);
+ * const chat = new ChatSession(() => appState.getLlmService());
  * await chat.sendMessage('Hello!');
  * console.log(chat.messages);
  * ```
@@ -29,15 +28,15 @@ export class ChatSession {
 	/** The latest generation failure message, or `null` when no failure is active. */
 	generationError: string | null = $state(null);
 
-	readonly _llm: LlmService;
+	private readonly _resolveLlmService: () => Promise<LlmService>;
 	private _abortController: AbortController | null = null;
 
-	/** Creates a chat session backed by the supplied LLM service.
+	/** Creates a chat session backed by an asynchronously resolved LLM service.
 	 *
-	 * @param llm - The service used to stream assistant responses.
+	 * @param resolveLlmService - Resolves the shared LLM service when response generation starts.
 	 */
-	constructor(llm: LlmService) {
-		this._llm = llm;
+	constructor(resolveLlmService: () => Promise<LlmService>) {
+		this._resolveLlmService = resolveLlmService;
 	}
 
 	/** Clears the conversation history to start a new chat.
@@ -116,7 +115,8 @@ export class ChatSession {
 		abortSignal: AbortSignal
 	): Promise<void> {
 		let isFirstContentChunk = true;
-		for await (const chunk of this._llm.generateResponse(requestMessages, abortSignal)) {
+		const llmService = await this._resolveLlmService();
+		for await (const chunk of llmService.generateResponse(requestMessages, abortSignal)) {
 			if (chunk.content === undefined || chunk.content === '') continue;
 
 			if (assistantMessageIndex === undefined) {
