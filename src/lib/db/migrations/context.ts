@@ -6,7 +6,7 @@ import type { ArcadiaDbSchema } from '../schema';
 
 /** Store names available on the database during a version-change transaction. */
 type DatabaseStoreName =
-	'settings' | 'repos' | 'refs' | 'commits' | 'garbageJobs' | 'garbageJobItems';
+	'settings' | 'repos' | 'refs' | 'commits' | 'garbageJobs' | 'garbageJobItems' | 'chatCatalog';
 
 /** Database and active transaction passed to each schema migration. */
 export interface MigrationContext {

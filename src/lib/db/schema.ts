@@ -2,7 +2,7 @@
 
 import type { DBSchema } from 'idb';
 
-import type { Commit, GarbageJob, GarbageJobItem, Ref, Repo } from '#lib/model';
+import type { Commit, GarbageJob, GarbageJobItem, Ref, Repo, ChatCatalog } from '#lib/model';
 
 /** IndexedDB stores and row shapes persisted by Arcadia. */
 export interface ArcadiaDbSchema extends DBSchema {
@@ -66,6 +66,15 @@ export interface ArcadiaDbSchema extends DBSchema {
 		indexes: {
 			/** Finds candidate items in a requested state for one job. */
 			'by-job-state': [string, GarbageJobItem['state']];
+		};
+	};
+
+	chatCatalog: {
+		key: string;
+		value: ChatCatalog;
+		indexes: {
+			'by-chat-repo': ChatCatalog['chatRepoId'];
+			'by-updated-at': ChatCatalog['updatedAt'];
 		};
 	};
 }
