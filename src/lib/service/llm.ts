@@ -1,13 +1,17 @@
-/** Loads saved LLM settings and adapts chat history to the OpenAI-compatible API.
+/** Resolves saved LLM settings and streams chat history through an OpenAI-compatible API.
  *
- * The provider reads the latest persisted configuration for each request so settings changes take
- * effect without recreating the chat session. Model and API key are omitted when blank because
- * some compatible providers, such as local servers, do not require them.
+ * The service reads the latest persisted configuration for each request, so saved setting changes
+ * apply to the next request without recreating the service or chat session. Blank model and API key
+ * values are omitted for compatible providers that do not require them.
  *
  * @example
  * ```ts
- * const provider = new LlmProvider();
- * for await (const chunk of provider.generateResponse([{ sender: 'user', content: 'Hello!' }])) {
+ * import { getDatabase } from '#lib/db';
+ * import { LlmService, SettingsService } from '#lib/service';
+ *
+ * const settingsService = new SettingsService(await getDatabase());
+ * const llmService = new LlmService(settingsService);
+ * for await (const chunk of llmService.generateResponse([{ sender: 'user', content: 'Hello!' }])) {
  * 	if (chunk.content !== undefined) console.log(chunk.content);
  * }
  * ```
@@ -23,17 +27,17 @@ import { AppError } from '#lib/error';
 import type { ChatMessage } from '#lib/model';
 import { getLogger } from '#lib/logger.ts';
 
-import { appState } from './app.svelte.ts';
+import type { SettingsService } from './settings.ts';
 
 /** Identifies which required LLM configuration value is missing. */
 export type LlmConfigurationIssue = 'provider' | 'endpoint';
 
-/** Indicates that no usable LLM provider configuration is available for a request. */
+/** Indicates that a request lacks a usable LLM configuration. */
 export class LlmConfigurationError extends AppError {
 	readonly kind = 'llm_configuration';
 	readonly issue: LlmConfigurationIssue;
 
-	/** Creates an error identifying the missing provider configuration. */
+	/** Creates an error identifying the missing required configuration value. */
 	constructor(issue: LlmConfigurationIssue) {
 		super(
 			issue === 'provider'
@@ -44,25 +48,31 @@ export class LlmConfigurationError extends AppError {
 	}
 }
 
-/** Logger scoped to LLM provider configuration and request preparation. */
-const log = getLogger('state/llm');
+/** Logger scoped to LLM service configuration and request preparation. */
+const log = getLogger('service/llm');
 
-/** Adapts configured chat history to the OpenAI-compatible streaming API. */
-export class LlmProvider {
+/** Resolves request-time LLM settings and streams adapted chat history to the configured API. */
+export class LlmService {
+	private readonly _settingsService: SettingsService;
+
+	/** Creates an LLM service backed by the supplied settings service. */
+	constructor(settingsService: SettingsService) {
+		this._settingsService = settingsService;
+	}
+
 	/**
 	 * Streams completion chunks for the supplied conversation history.
 	 *
 	 * @param messages - The conversation history to send to the provider.
 	 * @param abortSignal - Optional signal used by the caller to cancel generation.
 	 * @yields {OpenAiChatCompletionChunk} Normalized content, reasoning, or finish-reason chunks.
-	 * @throws {LlmConfigurationError|AppError|OpenAiError|Error|DOMException} when configuration, storage, or the provider request fails.
+	 * @throws {LlmConfigurationError|SettingsConfigCorruptError|SettingsCorruptError|SettingsDatabaseError|OpenAiError|Error|DOMException} when configuration, settings storage, or the API request fails.
 	 */
 	async *generateResponse(
 		messages: ChatMessage[],
 		abortSignal?: AbortSignal
 	): AsyncGenerator<OpenAiChatCompletionChunk, void, void> {
-		const settingsService = await appState.getSettingsService();
-		const config = await settingsService.getProviderConfig();
+		const config = await this._settingsService.getProviderConfig();
 		if (config === undefined) this._throwConfigurationError('provider');
 
 		const endpoint = config.endpoint.trim();
@@ -82,7 +92,7 @@ export class LlmProvider {
 		return messages.map(({ sender, content }) => ({ role: sender, content }));
 	}
 
-	/** Logs and creates a typed configuration error at the provider boundary. */
+	/** Logs and creates a typed configuration error at the service boundary. */
 	private _throwConfigurationError(issue: LlmConfigurationIssue): never {
 		const error = new LlmConfigurationError(issue);
 		log.error('LLM configuration is incomplete', { err: error, issue });

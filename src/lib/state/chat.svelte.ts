@@ -6,17 +6,17 @@
  *
  * @example
  * ```ts
- * import { ChatSession } from './chat.svelte';
- * import { LlmProvider } from './llm.svelte';
+ * import { appState, ChatSession } from '#lib/state';
  *
- * const chat = new ChatSession(new LlmProvider());
+ * const llmService = await appState.getLlmService();
+ * const chat = new ChatSession(llmService);
  * await chat.sendMessage('Hello!');
  * console.log(chat.messages);
  * ```
  */
 
+import type { LlmService } from '#lib/service/llm.ts';
 import type { ChatMessage } from '../model';
-import type { LlmProvider } from './llm.svelte';
 
 /** Owns one conversation's reactive message history and response-generation lifecycle. */
 export class ChatSession {
@@ -29,14 +29,14 @@ export class ChatSession {
 	/** The latest generation failure message, or `null` when no failure is active. */
 	generationError: string | null = $state(null);
 
-	readonly _llm: LlmProvider;
+	readonly _llm: LlmService;
 	private _abortController: AbortController | null = null;
 
-	/** Creates a chat session backed by the supplied language model provider.
+	/** Creates a chat session backed by the supplied LLM service.
 	 *
-	 * @param llm - The provider used to stream assistant responses.
+	 * @param llm - The service used to stream assistant responses.
 	 */
-	constructor(llm: LlmProvider) {
+	constructor(llm: LlmService) {
 		this._llm = llm;
 	}
 

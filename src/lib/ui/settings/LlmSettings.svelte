@@ -31,26 +31,26 @@
 
 	let saveTimeout: ReturnType<typeof setTimeout> | undefined;
 	let latestSaveVersion = 0;
-	let isDestroyed = false;
+	let isUnmounted = false;
 
 	async function loadProviderConfig(): Promise<void> {
 		try {
 			settingsService = await appState.getSettingsService();
-			if (isDestroyed) return;
+			if (isUnmounted) return;
 
 			isSettingsAvailable = true;
 			const savedConfig = await settingsService.getProviderConfig();
-			if (isDestroyed) return;
+			if (isUnmounted) return;
 
 			if (savedConfig !== undefined) {
 				providerConfig = savedConfig;
 			}
 		} catch (error: unknown) {
-			if (!isDestroyed) {
+			if (!isUnmounted) {
 				settingsError = errorMessage(error);
 			}
 		} finally {
-			if (!isDestroyed) {
+			if (!isUnmounted) {
 				isLoading = false;
 			}
 		}
@@ -96,7 +96,7 @@
 			: settingsService.saveProviderConfig(config);
 
 		void persistence.catch((error: unknown) => {
-			if (!isDestroyed && version === latestSaveVersion) {
+			if (!isUnmounted && version === latestSaveVersion) {
 				settingsError = errorMessage(error);
 			}
 		});
@@ -110,7 +110,7 @@
 		void loadProviderConfig();
 
 		return () => {
-			isDestroyed = true;
+			isUnmounted = true;
 			flushPendingSave();
 		};
 	});

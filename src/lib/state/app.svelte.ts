@@ -2,7 +2,7 @@
 
 import { getDatabase, type Database, type DatabasePromise } from '#lib/db';
 import { getLogger } from '#lib/logger';
-import { SettingsService, VersionControlService } from '#lib/service';
+import { SettingsService, LlmService, VersionControlService } from '#lib/service';
 
 import { GarbageCollectionService } from '../service/version-control/garbage-collection';
 
@@ -13,6 +13,7 @@ const log = getLogger('state/app');
 export class AppState {
 	private _db: DatabasePromise | undefined;
 	private _settingsService: SettingsService | undefined;
+	private _llmService: LlmService | undefined;
 	private _versionControlService: VersionControlService | undefined;
 	private _garbageCollectionService: GarbageCollectionService | undefined;
 	private _recoveryScheduled = false;
@@ -68,6 +69,19 @@ export class AppState {
 
 		const database = await this.initialize();
 		return (this._settingsService ??= new SettingsService(database));
+	}
+
+	/**
+	 * Returns the shared LLM service.
+	 *
+	 * @returns The lazily initialized LLM service.
+	 * @throws {Error|DOMException} when the database cannot be opened.
+	 */
+	async getLlmService(): Promise<LlmService> {
+		log.trace('getLlmService enter');
+		if (this._llmService !== undefined) return this._llmService;
+
+		return (this._llmService ??= new LlmService(await this.getSettingsService()));
 	}
 
 	/**
