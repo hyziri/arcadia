@@ -77,6 +77,31 @@ export class RepoRepo {
 		return repo;
 	}
 
+	async setDefaultRef(
+		repoId: string,
+		defaultRef: string,
+		tx?: ArcadiaTransaction<'readwrite'>
+	): Promise<Repo | undefined> {
+		try {
+			return await withTransaction(this._db, ['repos'], 'readwrite', tx, async (tx) => {
+				const store = tx.objectStore('repos');
+				const storedRow: unknown = await store.get(repoId);
+				if (storedRow === undefined) return undefined;
+
+				const current = parseRepo(storedRow, repoId);
+				const next = v.parse(RepoSchema, {
+					...current,
+					defaultRef
+				});
+
+				await store.put(next);
+				return next;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'repo', 'update', repoId, undefined, cause);
+		}
+	}
+
 	/**
 	 * Gets one repository by ID.
 	 *

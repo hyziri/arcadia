@@ -28,6 +28,7 @@ export const RepoKindSchema = v.picklist(['chat']);
 export const RepoSchema = v.strictObject({
 	id: v.string(),
 	kind: RepoKindSchema,
+	defaultRefId: v.optional(v.string()),
 	createdAt: v.number()
 });
 
@@ -36,7 +37,7 @@ export const RefSchema = v.strictObject({
 	id: v.string(),
 	repoId: v.string(),
 	name: v.string(),
-	targetCommitId: v.string(),
+	targetCommitId: v.nullable(v.string()),
 	updatedAt: v.number(),
 	createdAt: v.number()
 });

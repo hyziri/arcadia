@@ -52,6 +52,26 @@ export class VersionControlOwnershipError extends AppError {
 	}
 }
 
+export class RefNotFoundError extends AppError {
+	readonly kind = 'ref_not_found';
+	readonly refId: string;
+
+	constructor(refId: string) {
+		super('Failed to find requested ref');
+		this.refId = refId;
+	}
+}
+
+export class CommitNotFoundError extends AppError {
+	readonly kind = 'commit_not_found';
+	readonly commitId: string;
+
+	constructor(commitId: string) {
+		super('Failed to find requested commit');
+		this.commitId = commitId;
+	}
+}
+
 /** Preserves typed application and Valibot errors, wrapping other failures as database errors.
  *
  * @param logger - The repository-scoped logger.
@@ -112,4 +132,18 @@ export function reportVersionControlOwnershipFailure(
 		actualRepoId
 	});
 	return error;
+}
+
+/** Logs and throws when a required commit is missing. */
+export function throwRefNotFoundError(log: Logger, refId: string): never {
+	const error = new RefNotFoundError(refId);
+	log.error('ref not found', { err: error, refId });
+	throw error;
+}
+
+/** Logs and throws when a required commit is missing. */
+export function throwCommitNotFoundError(log: Logger, commitId: string): never {
+	const error = new CommitNotFoundError(commitId);
+	log.error('commit not found', { err: error, commitId });
+	throw error;
 }

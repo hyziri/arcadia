@@ -39,6 +39,10 @@ import { getLogger } from '#lib/logger';
 import type { Commit, Ref, Repo, RepoKind } from '#lib/model';
 
 import type { GarbageCollectionService } from './garbage-collection';
+import {
+	throwRefNotFoundError,
+	throwVersionControlDatabaseFailure
+} from '#lib/data/version-control/version-control-errors.ts';
 
 const COMMIT_CONTENT_FORMAT = 'arcadia/version-control-commit/v2';
 const log = getLogger('service/version-control');
@@ -162,12 +166,12 @@ export class VersionControlService {
 	 * @returns The created repository row.
 	 * @throws {v.ValiError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
-	createRepository(
+	async createRepository(
 		repoKind: RepoKind,
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Repo> {
 		log.trace('createRepository enter');
-		return this._repoRepo.create(repoKind, transaction);
+		return await this._repoRepo.create(repoKind, transaction);
 	}
 
 	/**
@@ -192,7 +196,13 @@ export class VersionControlService {
 			async (tx) => {
 				const sourceRepository = await this._requireRepository(sourceRepoId, tx);
 				const sourceRefs = await this._refRepo.getAllByRepo(sourceRepoId, tx);
-				const targetCommitIds = new Set(sourceRefs.map((ref) => ref.targetCommitId));
+				const targetCommitIds = new Set(
+					sourceRefs
+						.map((ref) => ref.targetCommitId)
+						.filter(
+							(targetCommitId): targetCommitId is string => typeof targetCommitId === 'string'
+						)
+				);
 				for (const targetCommitId of targetCommitIds) {
 					await this._requireCommit(targetCommitId, tx);
 				}
@@ -227,6 +237,32 @@ export class VersionControlService {
 		return this._repoRepo.get(repoId, transaction);
 	}
 
+	// Review: Do we validate ref actually belongs to repo?
+	async setRepoDefaultRef(
+		repoId: string,
+		refId: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<Repo> {
+		log.trace('set repo default ref enter', { repoId, refId });
+
+		try {
+			return await withTransaction(
+				this._db,
+				['repos', 'refs'],
+				'readwrite',
+				transaction,
+				async (tx) => {
+					const ref = await this._refRepo.get(repoId, refId);
+					if (ref === undefined) return throwRefNotFoundError(log, refId);
+
+					return await this._repoRepo.setDefaultRef(repoId, refId, tx);
+				}
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'repo', 'create', repoId, undefined, cause);
+		}
+	}
+
 	/**
 	 * Deletes a repository and atomically queues its ref targets for background collection.
 	 *
@@ -249,12 +285,19 @@ export class VersionControlService {
 				const repository = await this._repoRepo.get(repoId, tx);
 				if (repository === undefined) return false;
 				const refs = await this._refRepo.getAllByRepo(repoId, tx);
-				await this._garbageCollectionService.enqueue(
-					repoId,
-					'repository-deleted',
-					refs.map((ref) => ref.targetCommitId),
-					tx
-				);
+
+				const targetCommitIds = refs
+					.map((ref) => ref.targetCommitId)
+					.filter((targetCommitId): targetCommitId is string => typeof targetCommitId === 'string');
+				if (targetCommitIds.length > 0) {
+					await this._garbageCollectionService.enqueue(
+						repoId,
+						'repository-deleted',
+						targetCommitIds,
+						tx
+					);
+				}
+
 				await Promise.all(refs.map((ref) => this._refRepo.delete(ref, tx)));
 				await this._repoRepo.delete(repository, tx);
 				return true;
@@ -348,6 +391,20 @@ export class VersionControlService {
 		return this._commitRepo.get(commitId, transaction);
 	}
 
+	getCommitParentChain(
+		firstCommitId: string,
+		count: number,
+		transaction?: ArcadiaTransaction
+	): Promise<Commit[]> {
+		log.trace('get commit parent chain enter', { firstCommitId });
+		return this._commitRepo.getParentChain(firstCommitId, count, transaction);
+	}
+
+	getAllCommitsByAlternate(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit[]> {
+		log.trace('get all commits by alternate enter', { commitId });
+		return this._commitRepo.getAllByAlternate(commitId, transaction);
+	}
+
 	/**
 	 * Creates a named reference after verifying its repository and target commit exist.
 	 *
@@ -361,7 +418,7 @@ export class VersionControlService {
 	createRef(
 		repoId: string,
 		name: string,
-		targetCommitId: string,
+		targetCommitId?: string,
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Ref> {
 		log.trace('createRef enter', { repoId });
@@ -374,7 +431,10 @@ export class VersionControlService {
 			transaction,
 			async (tx) => {
 				await this._requireRepository(repoId, tx);
-				await this._requireCommit(input.targetCommitId, tx);
+				if (typeof input.targetCommitId === 'string') {
+					await this._requireCommit(input.targetCommitId, tx);
+				}
+
 				return this._refRepo.create(repoId, input, tx);
 			}
 		);
@@ -413,9 +473,9 @@ export class VersionControlService {
 		repoId: string,
 		refId: string,
 		name?: string,
-		targetCommitId?: string,
+		targetCommitId?: string | null,
 		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<Ref | undefined> {
+	): Promise<Ref> {
 		log.trace('updateRef enter', { repoId, refId });
 		const input = v.parse(UpdateDbRefParamSchema, {
 			...(name === undefined ? {} : { name }),
@@ -430,11 +490,14 @@ export class VersionControlService {
 			async (tx) => {
 				await this._requireRepository(repoId, tx);
 				const currentRef = await this._refRepo.get(repoId, refId, tx);
-				if (currentRef === undefined) return undefined;
+				if (currentRef === undefined) throwRefNotFoundError(log, refId);
 
-				const target = input.targetCommitId ?? currentRef.targetCommitId;
-				await this._requireCommit(target, tx);
-				if (target !== currentRef.targetCommitId) {
+				const target =
+					input.targetCommitId === undefined ? currentRef.targetCommitId : input.targetCommitId;
+				if (typeof input.targetCommitId === 'string') {
+					await this._requireCommit(input.targetCommitId, tx);
+				}
+				if (target !== currentRef.targetCommitId && typeof currentRef.targetCommitId === 'string') {
 					await this._garbageCollectionService.enqueue(
 						repoId,
 						'reference-moved',
@@ -473,12 +536,14 @@ export class VersionControlService {
 				if ((await this._repoRepo.get(repoId, tx)) === undefined) return false;
 				const ref = await this._refRepo.get(repoId, refId, tx);
 				if (ref === undefined) return false;
-				await this._garbageCollectionService.enqueue(
-					repoId,
-					'reference-deleted',
-					[ref.targetCommitId],
-					tx
-				);
+				if (ref.targetCommitId) {
+					await this._garbageCollectionService.enqueue(
+						repoId,
+						'reference-deleted',
+						[ref.targetCommitId],
+						tx
+					);
+				}
 				await this._refRepo.delete(ref, tx);
 				return true;
 			}

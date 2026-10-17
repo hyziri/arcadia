@@ -19,7 +19,7 @@ import * as v from 'valibot';
 import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
-import { CommitSchema, type Commit } from '#lib/model';
+import { CommitSchema, PaginationSchema, type Commit, type Pagination } from '#lib/model';
 
 import { throwVersionControlDatabaseFailure } from './version-control-errors';
 
@@ -118,6 +118,42 @@ export class CommitRepo {
 		return parseCommit(storedRow, commitId);
 	}
 
+	async getParentChain(
+		firstCommitId: string,
+		count: number,
+		transaction?: ArcadiaTransaction
+	): Promise<Commit[]> {
+		log.trace('get parent chain enter', { firstCommitId, count });
+
+		try {
+			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) => {
+				const store = tx.objectStore('commits');
+
+				const commits: Commit[] = [];
+				let nextCursor: string | undefined = firstCommitId;
+
+				while (nextCursor !== undefined && commits.length < count) {
+					const commitId = nextCursor;
+					const storedRow: unknown = await store.get(commitId);
+
+					if (storedRow === undefined) {
+						const error = new CommitAncestryCorruptError(commitId);
+						log.error('commit ancestry points to a missing commit', { err: error, commitId });
+						throw error;
+					}
+
+					const commit = parseCommit(storedRow, commitId);
+					commits.push(commit);
+					nextCursor = commit.parentCommitId ?? undefined;
+				}
+
+				return commits;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'read', firstCommitId, undefined, cause);
+		}
+	}
+
 	/**
 	 * Gets all commits that use the requested commit as their alternate.
 	 *
@@ -126,7 +162,7 @@ export class CommitRepo {
 	 * @returns The validated commits that reference the target as their alternate.
 	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError} when a row is invalid or the index cannot be queried.
 	 */
-	async getAllByAlternate(commitId: string, transaction: ArcadiaTransaction): Promise<Commit[]> {
+	async getAllByAlternate(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit[]> {
 		try {
 			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) => {
 				const commits: Commit[] = [];

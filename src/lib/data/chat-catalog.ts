@@ -116,7 +116,7 @@ export class ChatCatalogRepo {
 	 */
 	async create(
 		chatRepoId: string,
-		lastMessageCommitId: string,
+		lastMessageCommitId?: string,
 		tx?: ArcadiaTransaction<'readwrite'>
 	): Promise<ChatCatalogModel> {
 		log.trace('create enter', { chatRepoId });
