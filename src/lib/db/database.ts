@@ -24,7 +24,7 @@ import { runMigrations } from './migrations';
 const DATABASE_NAME = 'arcadia';
 
 /** Latest schema version; increment this when adding a migration. */
-const DATABASE_VERSION = 6;
+const DATABASE_VERSION = 7;
 
 /** Typed connection to the application's IndexedDB schema. */
 export type Database = IDBPDatabase<ArcadiaDbSchema>;

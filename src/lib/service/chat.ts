@@ -135,7 +135,7 @@ export class ChatService {
 		);
 	}
 
-	/** Forks a chat by copying its refs into a new repository while sharing immutable commits.
+	/** Forks a chat by copying its refs and alternate visibility into a new repository while sharing commits.
 	 *
 	 * @param chatCatalogId - The catalog entry identifying the source chat.
 	 * @returns The new catalog entry and forked repository.
@@ -146,7 +146,7 @@ export class ChatService {
 
 		return await withTransaction(
 			this._db,
-			['chatCatalog', 'repos', 'refs', 'commits'],
+			['chatCatalog', 'repos', 'refs', 'commits', 'repoAlternates'],
 			'readwrite',
 			undefined,
 			async (tx) => {
@@ -223,7 +223,7 @@ export class ChatService {
 
 		return withTransaction(
 			this._db,
-			['chatCatalog', 'repos', 'refs', 'garbageJobs', 'garbageJobItems'],
+			['chatCatalog', 'repos', 'refs', 'repoAlternates', 'garbageJobs', 'garbageJobItems'],
 			'readwrite',
 			undefined,
 			async (tx) => {
@@ -285,7 +285,15 @@ export class ChatService {
 
 		return withTransaction(
 			this._db,
-			['chatCatalog', 'repos', 'refs', 'commits', 'garbageJobItems', 'garbageJobs'],
+			[
+				'chatCatalog',
+				'repos',
+				'refs',
+				'commits',
+				'repoAlternates',
+				'garbageJobItems',
+				'garbageJobs'
+			],
 			'readwrite',
 			undefined,
 			async (tx) => {
@@ -304,7 +312,12 @@ export class ChatService {
 					currentCatalog.chatRepoId,
 					tx
 				);
-				const commit = await this._versionControlService.createCommit(preparedCommit, tx);
+				const commit = await this._versionControlService.createCommitForRepo(
+					currentCatalog.chatRepoId,
+					preparedCommit,
+					tx
+				);
+
 				const updatedRef = await this._versionControlService.updateRef(
 					currentCatalog.chatRepoId,
 					refId,
@@ -346,19 +359,35 @@ export class ChatService {
 		}));
 	}
 
-	/** Gets globally shared alternate commits for a message commit.
+	/** Gets the alternate commits visible to a chat for one message commit.
 	 *
-	 * @param commitId - The commit used as the alternate target.
-	 * @returns The alternate history entries.
-	 * @throws {AppError|DOMException} when the target or persisted commit data is invalid.
+	 * @param chatCatalogId - The catalog entry identifying the chat.
+	 * @param commitId - The commit whose alternatives are requested.
+	 * @returns The alternate history entries visible in the chat's repository.
+	 * @throws {AppError|DOMException} when the catalog, alternate relationship, or persisted commit data is invalid.
 	 */
-	async getMessageAlternates(commitId: string): Promise<ChatHistoryEntry[]> {
-		const commits = await this._versionControlService.getAllCommitsByAlternate(commitId);
+	async getMessageAlternates(chatCatalogId: string, commitId: string): Promise<ChatHistoryEntry[]> {
+		log.trace('get message alternates enter', { chatCatalogId, commitId });
 
-		return commits.map((commit) => ({
-			commitId: commit.id,
-			message: commit.data.message
-		}));
+		return withTransaction(
+			this._db,
+			['chatCatalog', 'repos', 'repoAlternates', 'commits'],
+			'readonly',
+			undefined,
+			async (tx) => {
+				const catalog = await this._requireCatalog(chatCatalogId, tx);
+				const commits = await this._versionControlService.getAlternateCommits(
+					catalog.chatRepoId,
+					commitId,
+					tx
+				);
+
+				return commits.map((commit) => ({
+					commitId: commit.id,
+					message: commit.data.message
+				}));
+			}
+		);
 	}
 
 	/** Truncates a ref's visible history at the selected message and later commits.

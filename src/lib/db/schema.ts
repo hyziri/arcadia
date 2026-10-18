@@ -2,7 +2,15 @@
 
 import type { DBSchema } from 'idb';
 
-import type { Commit, GarbageJob, GarbageJobItem, Ref, Repo, ChatCatalog } from '#lib/model';
+import type {
+	ChatCatalog,
+	Commit,
+	GarbageJob,
+	GarbageJobItem,
+	Ref,
+	Repo,
+	RepoAlternate
+} from '#lib/model';
 
 /** IndexedDB stores and row shapes persisted by Arcadia. */
 export interface ArcadiaDbSchema extends DBSchema {
@@ -34,6 +42,20 @@ export interface ArcadiaDbSchema extends DBSchema {
 			'by-repo-name': [string, string];
 			/** Finds refs targeting a commit. */
 			'by-target-commit': string;
+		};
+	};
+
+	/** Repository-scoped availability links for globally shared alternate commits. */
+	repoAlternates: {
+		key: [string, string, string];
+		value: RepoAlternate;
+		indexes: {
+			/** Lists alternate links owned by a repository. */
+			'by-repo': string;
+			/** Finds alternates of a commit that are visible in one repository. */
+			'by-repo-alternate-of': [string, string];
+			/** Finds repository memberships that keep an alternate commit live. */
+			'by-alternate-commit': string;
 		};
 	};
 

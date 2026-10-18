@@ -38,6 +38,13 @@ export const RefSchema = v.strictObject({
 	createdAt: v.number()
 });
 
+/** Validates a repository-scoped link that makes a globally shared alternate visible. */
+export const RepoAlternateSchema = v.strictObject({
+	repoId: v.string(),
+	alternateOfCommitId: v.string(),
+	alternateCommitId: v.string()
+});
+
 /** Validates the supported tagged payload variants stored in commits. */
 export const CommitDataSchema = v.variant('type', [ChatCommitDataSchema]);
 
@@ -70,6 +77,9 @@ export type Repo = v.InferOutput<typeof RepoSchema>;
 
 /** Named repository reference to a commit. */
 export type Ref = v.InferOutput<typeof RefSchema>;
+
+/** Repository membership for an alternate commit. */
+export type RepoAlternate = v.InferOutput<typeof RepoAlternateSchema>;
 
 /** Union of supported commit payloads. */
 export type CommitData = v.InferOutput<typeof CommitDataSchema>;

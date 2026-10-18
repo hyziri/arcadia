@@ -17,6 +17,7 @@ import { migrateToV3 } from './003-share-commits-across-repositories';
 import { migrateToV4 } from './004-add-garbage-collection-stores';
 import { migrateToV5 } from './005-add-chat-catalog-store';
 import { migrateToV6 } from './006-require-garbage-job-null-fields';
+import { migrateToV7 } from './007-add-repository-alternate-store';
 import { type MigrationContext } from './context';
 
 /** A schema change associated with the database version it produces. */
@@ -35,7 +36,8 @@ const migrations: readonly Migration[] = [
 	{ version: 3, migrate: migrateToV3 },
 	{ version: 4, migrate: migrateToV4 },
 	{ version: 5, migrate: migrateToV5 },
-	{ version: 6, migrate: migrateToV6 }
+	{ version: 6, migrate: migrateToV6 },
+	{ version: 7, migrate: migrateToV7 }
 ];
 
 /**

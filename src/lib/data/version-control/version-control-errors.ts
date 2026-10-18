@@ -6,7 +6,7 @@ import { AppError } from '#lib/error';
 import type { Logger } from '#lib/logger';
 
 /** Version-control data resources handled by the repositories. */
-export type VersionControlResource = 'repo' | 'ref' | 'commit';
+export type VersionControlResource = 'repo' | 'ref' | 'commit' | 'repo-alternate';
 
 /** Persistence operations supported by version-control repositories. */
 export type VersionControlOperation = 'create' | 'read' | 'update' | 'delete';

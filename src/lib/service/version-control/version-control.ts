@@ -28,6 +28,7 @@ import {
 	CreateDbCommitParamSchema,
 	CreateDbRefParamSchema,
 	RefRepo,
+	RepoAlternateRepo,
 	RepoRepo,
 	UpdateDbRefParamSchema,
 	type CreateDbCommitParam,
@@ -36,7 +37,7 @@ import {
 import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
-import type { Commit, Ref, Repo, RepoKind } from '#lib/model';
+import type { Commit, Ref, Repo, RepoAlternate, RepoKind } from '#lib/model';
 
 import type { GarbageCollectionService } from './garbage-collection';
 import {
@@ -149,6 +150,24 @@ export class SourceRepoDefaultRefUnresolvedError extends AppError {
 	}
 }
 
+/** Indicates that a repository-alternate link disagrees with the globally shared commit. */
+export class VersionControlAlternateMembershipError extends AppError {
+	readonly kind = 'version_control_alternate_membership_invalid';
+	readonly repoId: string;
+	readonly alternateOfCommitId: string;
+	readonly alternateCommitId: string;
+
+	/** Creates an error identifying an inconsistent repository-alternate link. */
+	constructor(repoId: string, alternateOfCommitId: string, alternateCommitId: string) {
+		super(
+			`Alternate commit ${alternateCommitId} does not alternate ${alternateOfCommitId} in repo ${repoId}`
+		);
+		this.repoId = repoId;
+		this.alternateOfCommitId = alternateOfCommitId;
+		this.alternateCommitId = alternateCommitId;
+	}
+}
+
 /** Exposes repository deletion only to the version-control orchestrator. */
 class MutableRepoRepo extends RepoRepo {
 	delete(repository: Repo, transaction: ArcadiaTransaction<'readwrite'>): Promise<boolean> {
@@ -176,6 +195,7 @@ export class VersionControlService {
 	private readonly _db: Database;
 	private readonly _repoRepo: MutableRepoRepo;
 	private readonly _refRepo: MutableRefRepo;
+	private readonly _repoAlternateRepo: RepoAlternateRepo;
 	private readonly _commitRepo: CommitRepo;
 	private readonly _garbageCollectionService: GarbageCollectionService;
 
@@ -188,6 +208,7 @@ export class VersionControlService {
 		this._db = database;
 		this._repoRepo = new MutableRepoRepo(database);
 		this._refRepo = new MutableRefRepo(database);
+		this._repoAlternateRepo = new RepoAlternateRepo(database);
 		this._commitRepo = new CommitRepo(database);
 		this._garbageCollectionService = garbageCollectionService;
 	}
@@ -209,12 +230,12 @@ export class VersionControlService {
 	}
 
 	/**
-	 * Forks a repository by creating a new repository and copying all refs to the same shared commits.
+	 * Forks a repository by copying its refs and alternate visibility links while sharing immutable commits.
 	 *
-	 * @param sourceRepoId - The repository whose kind and refs should be copied.
-	 * @param transaction - Optional caller-owned transaction spanning repositories, refs, and commits.
+	 * @param sourceRepoId - The repository whose kind, refs, and alternate links should be copied.
+	 * @param transaction - Optional caller-owned transaction spanning repositories, refs, commits, and alternate links.
 	 * @returns The new repository and its generated refs.
-	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|CommitCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the source or linked data is invalid or persistence fails.
+	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|RepoAlternateCorruptError|CommitCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the source or linked data is invalid or persistence fails.
 	 */
 	async forkRepository(
 		sourceRepoId: string,
@@ -224,12 +245,16 @@ export class VersionControlService {
 
 		return withTransaction(
 			this._db,
-			['repos', 'refs', 'commits'],
+			['repos', 'refs', 'commits', 'repoAlternates'],
 			'readwrite',
 			transaction,
 			async (tx) => {
 				const sourceRepository = await this.requireRepository(sourceRepoId, tx);
 				const sourceRefs = await this._refRepo.getAllByRepo(sourceRepoId, tx);
+				const sourceAlternates: RepoAlternate[] = await this._repoAlternateRepo.getAllByRepo(
+					sourceRepoId,
+					tx
+				);
 				const targetCommitIds = new Set(
 					sourceRefs
 						.map((ref) => ref.targetCommitId)
@@ -242,6 +267,14 @@ export class VersionControlService {
 				}
 
 				let forkedRepo = await this._repoRepo.create(sourceRepository.kind, tx);
+				await this._repoAlternateRepo.createMany(
+					forkedRepo.id,
+					sourceAlternates.map(({ alternateOfCommitId, alternateCommitId }) => ({
+						alternateOfCommitId,
+						alternateCommitId
+					})),
+					tx
+				);
 				const forkedRefs: Ref[] = [];
 				let forkedDefaultRefId: string | undefined = undefined;
 				for (const sourceRef of sourceRefs) {
@@ -326,12 +359,12 @@ export class VersionControlService {
 	}
 
 	/**
-	 * Deletes a repository and atomically queues its ref targets for background collection.
+	 * Deletes a repository and atomically queues its ref and alternate targets for background collection.
 	 *
 	 * @param repoId - The repository to delete.
-	 * @param transaction - Optional caller-owned transaction spanning repositories and GC stores.
+	 * @param transaction - Optional caller-owned transaction spanning repositories, refs, alternate links, and GC stores.
 	 * @returns `true` if the repository existed and was queued for deletion, otherwise `false`.
-	 * @throws {RepoCorruptError|RefCorruptError|VersionControlOwnershipError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
+	 * @throws {RepoCorruptError|RefCorruptError|RepoAlternateCorruptError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
 	async deleteRepository(
 		repoId: string,
@@ -340,17 +373,26 @@ export class VersionControlService {
 		log.trace('deleteRepository enter', { repoId });
 		const deleted = await withTransaction(
 			this._db,
-			['repos', 'refs', 'garbageJobs', 'garbageJobItems'],
+			['repos', 'refs', 'repoAlternates', 'garbageJobs', 'garbageJobItems'],
 			'readwrite',
 			transaction,
 			async (tx) => {
 				const repository = await this._repoRepo.get(repoId, tx);
 				if (repository === undefined) return false;
 				const refs = await this._refRepo.getAllByRepo(repoId, tx);
+				const repoAlternates: RepoAlternate[] = await this._repoAlternateRepo.deleteAllByRepo(
+					repoId,
+					tx
+				);
 
-				const targetCommitIds = refs
-					.map((ref) => ref.targetCommitId)
-					.filter((targetCommitId): targetCommitId is string => typeof targetCommitId === 'string');
+				const targetCommitIds = [
+					...refs
+						.map((ref) => ref.targetCommitId)
+						.filter(
+							(targetCommitId): targetCommitId is string => typeof targetCommitId === 'string'
+						),
+					...repoAlternates.map((alternate) => alternate.alternateCommitId)
+				];
 				if (targetCommitIds.length > 0) {
 					await this._garbageCollectionService.enqueue(
 						repoId,
@@ -440,6 +482,37 @@ export class VersionControlService {
 		});
 	}
 
+	/** Creates a shared commit and registers its alternate visibility in the repository atomically.
+	 *
+	 * @param repoId - The repository in which an alternate should be visible.
+	 * @param preparedCommit - The exact immutable object returned by `prepareCommit`.
+	 * @param transaction - Optional caller-owned transaction spanning repositories, commits, and alternate links.
+	 * @returns The persisted global commit.
+	 * @throws {VersionControlResourceNotFoundError|VersionControlCommitNotPreparedError|VersionControlCommitConflictError|VersionControlAlternateMembershipError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the repository or linked data is invalid or persistence fails.
+	 */
+	async createCommitForRepo(
+		repoId: string,
+		preparedCommit: PreparedCommit,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<Commit> {
+		log.trace('create commit for repository enter', { repoId, commitId: preparedCommit.commitId });
+
+		return withTransaction(
+			this._db,
+			['repos', 'commits', 'repoAlternates'],
+			'readwrite',
+			transaction,
+			async (tx) => {
+				await this.requireRepository(repoId, tx);
+				const commit = await this.createCommit(preparedCommit, tx);
+				if (commit.alternateOfCommitId !== null) {
+					await this.createRepoAlternate(repoId, commit.alternateOfCommitId, commit.id, tx);
+				}
+				return commit;
+			}
+		);
+	}
+
 	/**
 	 * Gets one globally shared commit by ID.
 	 *
@@ -470,16 +543,92 @@ export class VersionControlService {
 		return this._commitRepo.getParentChain(firstCommitId, count, transaction);
 	}
 
-	/** Gets globally shared commits that use the specified commit as their alternate.
+	/** Adds a globally shared alternate to one repository's visible alternate set.
 	 *
-	 * @param commitId - The commit used as the alternate target.
-	 * @param transaction - Optional caller-owned transaction containing the commits store.
-	 * @returns The validated commits that reference the target as their alternate.
-	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is corrupt or the index cannot be queried.
+	 * @param repoId - The repository that owns this alternate relationship.
+	 * @param alternateOfCommitId - The commit this alternate replaces.
+	 * @param alternateCommitId - The globally shared alternate commit.
+	 * @param transaction - Optional caller-owned transaction spanning repositories and commits.
+	 * @returns The persisted repository-alternate relationship.
+	 * @throws {VersionControlResourceNotFoundError|VersionControlAlternateMembershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when linked data is missing, inconsistent, or persistence fails.
 	 */
-	getAllCommitsByAlternate(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit[]> {
-		log.trace('get all commits by alternate enter', { commitId });
-		return this._commitRepo.getAllByAlternate(commitId, transaction);
+	async createRepoAlternate(
+		repoId: string,
+		alternateOfCommitId: string,
+		alternateCommitId: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<RepoAlternate> {
+		log.trace('create repository alternate enter', { repoId, alternateCommitId });
+
+		return withTransaction(
+			this._db,
+			['repos', 'commits', 'repoAlternates'],
+			'readwrite',
+			transaction,
+			async (tx) => {
+				await this.requireRepository(repoId, tx);
+				await this.requireCommit(alternateOfCommitId, tx);
+				const alternateCommit = await this.requireCommit(alternateCommitId, tx);
+				if (alternateCommit.alternateOfCommitId !== alternateOfCommitId) {
+					throwVersionControlAlternateMembershipError(
+						repoId,
+						alternateOfCommitId,
+						alternateCommitId
+					);
+				}
+
+				return this._repoAlternateRepo.create(
+					repoId,
+					{ alternateOfCommitId, alternateCommitId },
+					tx
+				);
+			}
+		);
+	}
+
+	/** Gets globally shared alternates visible to the requested repository.
+	 *
+	 * @param repoId - The repository whose alternate set is queried.
+	 * @param alternateOfCommitId - The commit whose alternatives are requested.
+	 * @param transaction - Optional caller-owned transaction containing repositories, links, and commits.
+	 * @returns The validated alternate commits visible in that repository.
+	 * @throws {VersionControlResourceNotFoundError|RepoAlternateCorruptError|VersionControlAlternateMembershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when linked data is missing, inconsistent, or a read fails.
+	 */
+	async getAlternateCommits(
+		repoId: string,
+		alternateOfCommitId: string,
+		transaction?: ArcadiaTransaction
+	): Promise<Commit[]> {
+		log.trace('get repository alternates enter', { repoId, alternateOfCommitId });
+
+		return withTransaction(
+			this._db,
+			['repos', 'repoAlternates', 'commits'],
+			'readonly',
+			transaction,
+			async (tx) => {
+				await this.requireRepository(repoId, tx);
+				await this.requireCommit(alternateOfCommitId, tx);
+				const repoAlternates: RepoAlternate[] = await this._repoAlternateRepo.getAllByAlternateOf(
+					repoId,
+					alternateOfCommitId,
+					tx
+				);
+				return Promise.all(
+					repoAlternates.map(async (repoAlternate) => {
+						const commit = await this.requireCommit(repoAlternate.alternateCommitId, tx);
+						if (commit.alternateOfCommitId !== repoAlternate.alternateOfCommitId) {
+							throwVersionControlAlternateMembershipError(
+								repoId,
+								repoAlternate.alternateOfCommitId,
+								repoAlternate.alternateCommitId
+							);
+						}
+						return commit;
+					})
+				);
+			}
+		);
 	}
 
 	/**
@@ -731,6 +880,26 @@ export class VersionControlService {
 			if (commitId !== null) await this.requireCommit(commitId, transaction);
 		}
 	}
+}
+
+/** Logs and throws when a repository link does not match the linked alternate commit. */
+function throwVersionControlAlternateMembershipError(
+	repoId: string,
+	alternateOfCommitId: string,
+	alternateCommitId: string
+): never {
+	const error = new VersionControlAlternateMembershipError(
+		repoId,
+		alternateOfCommitId,
+		alternateCommitId
+	);
+	log.error('repository alternate membership does not match commit', {
+		err: error,
+		repoId,
+		alternateOfCommitId,
+		alternateCommitId
+	});
+	throw error;
 }
 
 /** Compares persisted commit content with the content covered by a prepared ID. */

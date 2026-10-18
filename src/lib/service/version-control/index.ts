@@ -6,6 +6,7 @@ export {
 	VersionControlCommitPreparationError,
 	VersionControlCommitNotOnRefHistoryError,
 	VersionControlCommitAncestryCycleError,
+	VersionControlAlternateMembershipError,
 	VersionControlService
 } from './version-control';
 export type { ForkedRepository, PreparedCommit } from './version-control';
