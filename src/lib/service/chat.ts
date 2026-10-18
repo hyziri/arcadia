@@ -251,26 +251,32 @@ export class ChatService {
 		chatCatalogId: string,
 		refId: string,
 		message: ChatMessage,
-		alternateOfCommitId?: string
+		alternateOfCommit: boolean = false
 	): Promise<[Ref, ChatHistoryEntry]> {
 		log.trace('Add message enter', { chatCatalogId, refId });
 
-		const { catalog, ref } = await withTransaction(
+		const { catalog, ref, altCommit } = await withTransaction(
 			this._db,
 			['chatCatalog', 'repos', 'refs', 'commits'],
 			'readonly',
 			undefined,
 			async (tx) => {
+				let altCommit = undefined;
 				const catalog = await this._requireCatalog(chatCatalogId, tx);
 				const ref = await this._versionControlService.requireRef(catalog.chatRepoId, refId, tx);
 
-				return { catalog, ref };
+				if (alternateOfCommit && ref.targetCommitId !== null) {
+					altCommit = await this._versionControlService.requireCommit(ref.targetCommitId, tx);
+				}
+
+				return { catalog, ref, altCommit };
 			}
 		);
 
 		const preparedCommit = await this._versionControlService.prepareCommit({
-			parentCommitId: ref.targetCommitId ?? null,
-			alternateOfCommitId: alternateOfCommitId ?? null,
+			parentCommitId:
+				altCommit === undefined ? (ref.targetCommitId ?? null) : altCommit.parentCommitId,
+			alternateOfCommitId: altCommit?.id ?? null,
 			data: {
 				type: 'chat-message',
 				message
