@@ -6,14 +6,10 @@
 
 import * as v from 'valibot';
 
+import { ChatMessageSchema } from '../chat';
+
 /** Validates the sender roles supported by chat messages. */
 export const ChatMessageSenderSchema = v.picklist(['user', 'assistant']);
-
-/** Validates the sender and content stored for a chat message. */
-export const ChatMessageSchema = v.strictObject({
-	sender: ChatMessageSenderSchema,
-	content: v.string()
-});
 
 /** Validates the tagged chat-message payload stored in a commit. */
 export const ChatCommitDataSchema = v.strictObject({
@@ -28,6 +24,7 @@ export const RepoKindSchema = v.picklist(['chat']);
 export const RepoSchema = v.strictObject({
 	id: v.string(),
 	kind: RepoKindSchema,
+	defaultRefId: v.nullable(v.string()),
 	createdAt: v.number()
 });
 
@@ -36,7 +33,7 @@ export const RefSchema = v.strictObject({
 	id: v.string(),
 	repoId: v.string(),
 	name: v.string(),
-	targetCommitId: v.string(),
+	targetCommitId: v.nullable(v.string()),
 	updatedAt: v.number(),
 	createdAt: v.number()
 });

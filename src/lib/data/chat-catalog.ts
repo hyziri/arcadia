@@ -7,12 +7,7 @@
 
 import * as v from 'valibot';
 
-import {
-	ChatCatalogSchema,
-	PaginationSchema,
-	type ChatCatalog as ChatCatalogModel,
-	type Pagination
-} from '#lib/model';
+import { ChatCatalogSchema, PaginationSchema, type ChatCatalog, type Pagination } from '#lib/model';
 import { getLogger } from '#lib/logger.ts';
 import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError } from '#lib/error.ts';
@@ -92,6 +87,18 @@ export class ChatCatalogOwnershipError extends AppError {
 	}
 }
 
+/** Indicates that a required chat catalog row does not exist. */
+export class ChatCatalogNotFoundError extends AppError {
+	readonly kind = 'chat_catalog_not_found';
+	readonly chatCatalogId: string;
+
+	/** Creates an error identifying the missing catalog row. */
+	constructor(chatCatalogId: string) {
+		super('Failed to find requested chat catalog');
+		this.chatCatalogId = chatCatalogId;
+	}
+}
+
 /** Provides validated CRUD and recent-list operations for persisted chat catalog rows. */
 export class ChatCatalogRepo {
 	private readonly _db: Database;
@@ -116,9 +123,9 @@ export class ChatCatalogRepo {
 	 */
 	async create(
 		chatRepoId: string,
-		lastMessageCommitId: string,
+		lastMessageCommitId?: string | null,
 		tx?: ArcadiaTransaction<'readwrite'>
-	): Promise<ChatCatalogModel> {
+	): Promise<ChatCatalog> {
 		log.trace('create enter', { chatRepoId });
 
 		const chatCatalogId = crypto.randomUUID();
@@ -126,7 +133,7 @@ export class ChatCatalogRepo {
 		const chatCatalog = v.parse(ChatCatalogSchema, {
 			id: chatCatalogId,
 			chatRepoId,
-			lastMessageCommitId,
+			lastMessageCommitId: lastMessageCommitId ?? null,
 			createdAt: now,
 			updatedAt: now
 		});
@@ -153,7 +160,7 @@ export class ChatCatalogRepo {
 	async getByCatalogId(
 		catalogId: string,
 		tx?: ArcadiaTransaction
-	): Promise<ChatCatalogModel | undefined> {
+	): Promise<ChatCatalog | undefined> {
 		log.trace('get enter', { catalogId });
 
 		let storedRow: unknown;
@@ -183,7 +190,7 @@ export class ChatCatalogRepo {
 	async getByChatRepoId(
 		chatRepoId: string,
 		tx?: ArcadiaTransaction
-	): Promise<ChatCatalogModel | undefined> {
+	): Promise<ChatCatalog | undefined> {
 		log.trace('get by chat repo enter', { chatRepoId });
 
 		let storedEntry: { catalogId: string; storedRow: unknown } | undefined;
@@ -218,7 +225,7 @@ export class ChatCatalogRepo {
 	 * @returns The validated catalog entries for the requested page.
 	 * @throws {v.ValiError|ChatCatalogCorruptError|ChatCatalogDatabaseError|TransactionScopeError|OperationTimeoutError|DOMException} when pagination is invalid, a row is corrupt, or the read fails.
 	 */
-	async getRecent(pagination: Pagination, tx?: ArcadiaTransaction): Promise<ChatCatalogModel[]> {
+	async getRecent(pagination: Pagination, tx?: ArcadiaTransaction): Promise<ChatCatalog[]> {
 		const { page, perPage } = v.parse(PaginationSchema, pagination);
 		log.trace('get recent enter', { page, perPage });
 
@@ -263,15 +270,15 @@ export class ChatCatalogRepo {
 	 * @param chatRepoId - The expected owning chat repository ID.
 	 * @param lastMessageCommitId - The commit used to identify the latest chat message.
 	 * @param tx - Optional caller-owned read-write transaction containing the catalog store.
-	 * @returns The updated entry, or `undefined` if it does not exist.
-	 * @throws {v.ValiError|ChatCatalogCorruptError|ChatCatalogOwnershipError|ChatCatalogDatabaseError|TransactionScopeError|OperationTimeoutError|DOMException} when validation, ownership verification, or persistence fails.
+	 * @returns The updated catalog entry.
+	 * @throws {v.ValiError|ChatCatalogNotFoundError|ChatCatalogCorruptError|ChatCatalogOwnershipError|ChatCatalogDatabaseError|TransactionScopeError|OperationTimeoutError|DOMException} when the catalog is missing, validation or ownership verification fails, or persistence fails.
 	 */
 	async update(
 		chatRepoId: string,
 		catalogId: string,
-		lastMessageCommitId: string,
+		lastMessageCommitId: string | null,
 		tx?: ArcadiaTransaction<'readwrite'>
-	): Promise<ChatCatalogModel | undefined> {
+	): Promise<ChatCatalog> {
 		log.trace('update enter', { catalogId });
 
 		try {
@@ -282,10 +289,8 @@ export class ChatCatalogRepo {
 				tx,
 				async (transaction) => {
 					const store = transaction.objectStore('chatCatalog');
-					const storedRow: unknown = await store.get(catalogId);
-					if (storedRow === undefined) return undefined;
+					const current = await this.requireCatalog(catalogId, transaction);
 
-					const current = parseChatCatalog(catalogId, storedRow);
 					if (current.chatRepoId !== chatRepoId)
 						throwChatCatalogOwnershipFailure(catalogId, chatRepoId, current.chatRepoId);
 
@@ -337,10 +342,26 @@ export class ChatCatalogRepo {
 			throwDatabaseFailure('delete', catalogId, cause);
 		}
 	}
+
+	/** Gets a required catalog entry by ID.
+	 *
+	 * @param chatCatalogId - The catalog entry that must exist.
+	 * @param tx - Optional caller-owned transaction containing the catalog store.
+	 * @returns The validated catalog entry.
+	 * @throws {ChatCatalogNotFoundError|ChatCatalogCorruptError|ChatCatalogDatabaseError|TransactionScopeError|OperationTimeoutError|DOMException} when the catalog is missing, corrupt, or cannot be read.
+	 */
+	async requireCatalog(chatCatalogId: string, tx?: ArcadiaTransaction): Promise<ChatCatalog> {
+		const catalog = await this.getByCatalogId(chatCatalogId, tx);
+		if (catalog !== undefined) return catalog;
+
+		const error = new ChatCatalogNotFoundError(chatCatalogId);
+		log.error('chat catalog not found', { err: error });
+		throw error;
+	}
 }
 
 /** Validates a persisted row and throws a typed corruption error with its catalog ID on failure. */
-function parseChatCatalog(catalogId: string, storedRow: unknown): ChatCatalogModel {
+function parseChatCatalog(catalogId: string, storedRow: unknown): ChatCatalog {
 	const parsed = v.safeParse(ChatCatalogSchema, storedRow);
 
 	if (!parsed.success) {

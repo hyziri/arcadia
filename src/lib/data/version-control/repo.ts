@@ -22,7 +22,10 @@ import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
 import { RepoKindSchema, RepoSchema, type Repo, type RepoKind } from '#lib/model';
 
-import { throwVersionControlDatabaseFailure } from './version-control-errors';
+import {
+	throwVersionControlDatabaseFailure,
+	VersionControlResourceNotFoundError
+} from './version-control-errors';
 
 /** Logger scoped to repository persistence and validation. */
 const log = getLogger('data/version-control/repo');
@@ -45,7 +48,10 @@ export class RepoCorruptError extends AppError {
 export class RepoRepo {
 	private readonly _db: Database;
 
-	/** Creates a repository backed by the supplied database connection. */
+	/** Creates a repository backed by the supplied database connection.
+	 *
+	 * @param database - The database used for repository persistence.
+	 */
 	constructor(database: Database) {
 		this._db = database;
 	}
@@ -63,7 +69,12 @@ export class RepoRepo {
 
 		const kind = v.parse(RepoKindSchema, repoKind);
 		const repoId = crypto.randomUUID();
-		const repo = v.parse(RepoSchema, { id: repoId, kind, createdAt: Date.now() });
+		const repo = v.parse(RepoSchema, {
+			id: repoId,
+			kind,
+			defaultRefId: null,
+			createdAt: Date.now()
+		});
 
 		try {
 			await withTransaction(this._db, ['repos'], 'readwrite', transaction, async (tx) => {
@@ -99,6 +110,52 @@ export class RepoRepo {
 
 		if (storedRow === undefined) return undefined;
 		return parseRepo(storedRow, repoId);
+	}
+
+	/** Updates the repository's default-ref pointer.
+	 *
+	 * @param repoId - The repository whose default ref to update.
+	 * @param defaultRefId - The new default ref ID, or `null` to clear it.
+	 * @param tx - Optional caller-owned read-write transaction containing the repository store.
+	 * @returns The updated repository row.
+	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the repository is missing, the stored row is invalid, or persistence fails.
+	 */
+	async setDefaultRef(
+		repoId: string,
+		defaultRefId: string | null,
+		tx?: ArcadiaTransaction<'readwrite'>
+	): Promise<Repo> {
+		try {
+			return await withTransaction(this._db, ['repos'], 'readwrite', tx, async (tx) => {
+				const store = tx.objectStore('repos');
+				const current = await this.requireRepository(repoId, tx);
+				const next = v.parse(RepoSchema, {
+					...current,
+					defaultRefId
+				});
+
+				await store.put(next);
+				return next;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'repo', 'update', repoId, undefined, cause);
+		}
+	}
+
+	/** Gets a required repository row.
+	 *
+	 * @param repoId - The repository ID that must exist.
+	 * @param tx - Optional caller-owned transaction containing the repository store.
+	 * @returns The validated repository row.
+	 * @throws {VersionControlResourceNotFoundError|RepoCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the repository is missing, corrupt, or cannot be read.
+	 */
+	async requireRepository(repoId: string, tx?: ArcadiaTransaction): Promise<Repo> {
+		const repository = await this.get(repoId, tx);
+		if (repository !== undefined) return repository;
+
+		const error = new VersionControlResourceNotFoundError('repo', repoId);
+		log.error('version-control repository not found', { err: error, repoId });
+		throw error;
 	}
 
 	/**

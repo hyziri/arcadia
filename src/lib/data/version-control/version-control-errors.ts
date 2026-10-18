@@ -52,6 +52,26 @@ export class VersionControlOwnershipError extends AppError {
 	}
 }
 
+/** Indicates that a required version-control resource does not exist. */
+export class VersionControlResourceNotFoundError extends AppError {
+	readonly kind = 'version_control_resource_not_found';
+	readonly resource: 'repo' | 'ref' | 'commit';
+	readonly resourceId: string;
+
+	/** Creates an error describing a missing repository, ref, or commit. */
+	constructor(resource: 'repo' | 'ref' | 'commit', resourceId: string) {
+		super(
+			resource === 'repo'
+				? `Version-control repository not found: ${resourceId}`
+				: resource === 'ref'
+					? `Version-control ref not found: ${resourceId}`
+					: `Version-control commit not found: ${resourceId}`
+		);
+		this.resource = resource;
+		this.resourceId = resourceId;
+	}
+}
+
 /** Preserves typed application and Valibot errors, wrapping other failures as database errors.
  *
  * @param logger - The repository-scoped logger.
@@ -60,7 +80,7 @@ export class VersionControlOwnershipError extends AppError {
  * @param resourceId - The ID of the resource being accessed.
  * @param repoId - The owning repository ID, when applicable.
  * @param cause - The original failure.
- * @throws {AppError|Error|VersionControlDatabaseError} with the original cause or as a database error.
+ * @throws {AppError|v.ValiError|VersionControlDatabaseError} when the cause is already typed or must be wrapped as a database failure.
  */
 export function throwVersionControlDatabaseFailure(
 	logger: Logger,
@@ -77,7 +97,16 @@ export function throwVersionControlDatabaseFailure(
 	throw reportVersionControlDatabaseFailure(logger, resource, operation, resourceId, repoId, cause);
 }
 
-/** Logs and wraps an IndexedDB failure at the repository boundary. */
+/** Logs an unexpected IndexedDB failure and returns its typed database error.
+ *
+ * @param logger - The repository-scoped logger.
+ * @param resource - The version-control resource involved.
+ * @param operation - The persistence operation that failed.
+ * @param resourceId - The ID of the resource being accessed.
+ * @param repoId - The owning repository ID, when applicable.
+ * @param cause - The original low-level failure to preserve as the error cause.
+ * @returns The logged database error wrapping the original failure.
+ */
 export function reportVersionControlDatabaseFailure(
 	logger: Logger,
 	resource: VersionControlResource,
@@ -97,7 +126,14 @@ export function reportVersionControlDatabaseFailure(
 	return error;
 }
 
-/** Logs and creates a reference ownership error at the repository boundary. */
+/** Logs and creates a reference ownership error at the repository boundary.
+ *
+ * @param logger - The repository-scoped logger.
+ * @param resourceId - The ref ID addressed by the operation.
+ * @param expectedRepoId - The repository ID supplied by the caller.
+ * @param actualRepoId - The repository ID recorded on the ref.
+ * @returns The logged ownership error for the caller to throw.
+ */
 export function reportVersionControlOwnershipFailure(
 	logger: Logger,
 	resourceId: string,

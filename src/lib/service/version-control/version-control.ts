@@ -39,6 +39,10 @@ import { getLogger } from '#lib/logger';
 import type { Commit, Ref, Repo, RepoKind } from '#lib/model';
 
 import type { GarbageCollectionService } from './garbage-collection';
+import {
+	throwVersionControlDatabaseFailure,
+	VersionControlResourceNotFoundError
+} from '#lib/data/version-control/version-control-errors.ts';
 
 const COMMIT_CONTENT_FORMAT = 'arcadia/version-control-commit/v2';
 const log = getLogger('service/version-control');
@@ -60,24 +64,6 @@ export type PreparedCommit = DeepReadonly<PreparedCommitValue> & {
 export interface ForkedRepository {
 	readonly repository: Repo;
 	readonly refs: readonly Ref[];
-}
-
-/** Indicates that a required version-control resource does not exist. */
-export class VersionControlResourceNotFoundError extends AppError {
-	readonly kind = 'version_control_resource_not_found';
-	readonly resource: 'repo' | 'commit';
-	readonly resourceId: string;
-
-	/** Creates an error describing a missing repository or commit. */
-	constructor(resource: 'repo' | 'commit', resourceId: string) {
-		super(
-			resource === 'repo'
-				? `Version-control repository not found: ${resourceId}`
-				: `Version-control commit not found: ${resourceId}`
-		);
-		this.resource = resource;
-		this.resourceId = resourceId;
-	}
 }
 
 /** Indicates that a commit ID already exists with content different from its prepared content. */
@@ -108,6 +94,24 @@ export class VersionControlCommitPreparationError extends AppError {
 	/** Creates an error describing a failure while hashing a commit. */
 	constructor(options?: ErrorOptions) {
 		super('Could not prepare a content-addressed commit', options);
+	}
+}
+
+/** Indicates that a source repository's configured default ref was not among its refs. */
+export class SourceRepoDefaultRefUnresolvedError extends AppError {
+	readonly kind = 'default_ref_not_forked_for_repository';
+	readonly sourceRepoId: string;
+	readonly sourceDefaultRefId: string;
+	readonly forkedRepoId: string;
+
+	/** Creates an error identifying the source ref that could not be mapped into the fork. */
+	constructor(sourceRepoId: string, sourceDefaultRefId: string, forkedRepoId: string) {
+		super(
+			`Default ref ${sourceDefaultRefId} from repo ${sourceRepoId} was not properly forked for ${forkedRepoId}`
+		);
+		this.sourceRepoId = sourceRepoId;
+		this.sourceDefaultRefId = sourceDefaultRefId;
+		this.forkedRepoId = forkedRepoId;
 	}
 }
 
@@ -162,12 +166,12 @@ export class VersionControlService {
 	 * @returns The created repository row.
 	 * @throws {v.ValiError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation or persistence fails.
 	 */
-	createRepository(
+	async createRepository(
 		repoKind: RepoKind,
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Repo> {
 		log.trace('createRepository enter');
-		return this._repoRepo.create(repoKind, transaction);
+		return await this._repoRepo.create(repoKind, transaction);
 	}
 
 	/**
@@ -190,26 +194,53 @@ export class VersionControlService {
 			'readwrite',
 			transaction,
 			async (tx) => {
-				const sourceRepository = await this._requireRepository(sourceRepoId, tx);
+				const sourceRepository = await this.requireRepository(sourceRepoId, tx);
 				const sourceRefs = await this._refRepo.getAllByRepo(sourceRepoId, tx);
-				const targetCommitIds = new Set(sourceRefs.map((ref) => ref.targetCommitId));
-				for (const targetCommitId of targetCommitIds) {
-					await this._requireCommit(targetCommitId, tx);
-				}
-
-				const repository = await this._repoRepo.create(sourceRepository.kind, tx);
-				const refs: Ref[] = [];
-				for (const sourceRef of sourceRefs) {
-					refs.push(
-						await this._refRepo.create(
-							repository.id,
-							{ name: sourceRef.name, targetCommitId: sourceRef.targetCommitId },
-							tx
+				const targetCommitIds = new Set(
+					sourceRefs
+						.map((ref) => ref.targetCommitId)
+						.filter(
+							(targetCommitId): targetCommitId is string => typeof targetCommitId === 'string'
 						)
-					);
+				);
+				for (const targetCommitId of targetCommitIds) {
+					await this.requireCommit(targetCommitId, tx);
 				}
 
-				return { repository, refs };
+				let forkedRepo = await this._repoRepo.create(sourceRepository.kind, tx);
+				const forkedRefs: Ref[] = [];
+				let forkedDefaultRefId: string | undefined = undefined;
+				for (const sourceRef of sourceRefs) {
+					const forkedRef = await this._refRepo.create(
+						forkedRepo.id,
+						{ name: sourceRef.name, targetCommitId: sourceRef.targetCommitId },
+						tx
+					);
+
+					if (sourceRepository.defaultRefId === sourceRef.id) {
+						forkedDefaultRefId = forkedRef.id;
+					}
+
+					forkedRefs.push(forkedRef);
+				}
+
+				if (typeof sourceRepository.defaultRefId === 'string') {
+					if (forkedDefaultRefId !== undefined) {
+						forkedRepo = await this._repoRepo.setDefaultRef(forkedRepo.id, forkedDefaultRefId, tx);
+					} else {
+						const error = new SourceRepoDefaultRefUnresolvedError(
+							sourceRepository.id,
+							sourceRepository.defaultRefId,
+							forkedRepo.id
+						);
+						log.error('Failed to fork repository', {
+							err: error
+						});
+						throw error;
+					}
+				}
+
+				return { repository: forkedRepo, refs: forkedRefs };
 			}
 		);
 	}
@@ -225,6 +256,39 @@ export class VersionControlService {
 	getRepository(repoId: string, transaction?: ArcadiaTransaction): Promise<Repo | undefined> {
 		log.trace('getRepository enter', { repoId });
 		return this._repoRepo.get(repoId, transaction);
+	}
+
+	/** Sets a repository's default ref after verifying the ref belongs to that repository.
+	 *
+	 * @param repoId - The repository whose default ref to update.
+	 * @param refId - The ref to make the repository default.
+	 * @param transaction - Optional caller-owned read-write transaction containing repos and refs.
+	 * @returns The updated repository and validated ref.
+	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation, resource lookup, ownership verification, or persistence fails.
+	 */
+	async setRepoDefaultRef(
+		repoId: string,
+		refId: string,
+		transaction?: ArcadiaTransaction<'readwrite'>
+	): Promise<{ repo: Repo; ref: Ref }> {
+		log.trace('set repo default ref enter', { repoId, refId });
+
+		try {
+			return await withTransaction(
+				this._db,
+				['repos', 'refs'],
+				'readwrite',
+				transaction,
+				async (tx) => {
+					const ref = await this.requireRef(repoId, refId, tx);
+					const repo = await this._repoRepo.setDefaultRef(repoId, refId, tx);
+
+					return { repo, ref };
+				}
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'repo', 'update', repoId, undefined, cause);
+		}
 	}
 
 	/**
@@ -249,12 +313,19 @@ export class VersionControlService {
 				const repository = await this._repoRepo.get(repoId, tx);
 				if (repository === undefined) return false;
 				const refs = await this._refRepo.getAllByRepo(repoId, tx);
-				await this._garbageCollectionService.enqueue(
-					repoId,
-					'repository-deleted',
-					refs.map((ref) => ref.targetCommitId),
-					tx
-				);
+
+				const targetCommitIds = refs
+					.map((ref) => ref.targetCommitId)
+					.filter((targetCommitId): targetCommitId is string => typeof targetCommitId === 'string');
+				if (targetCommitIds.length > 0) {
+					await this._garbageCollectionService.enqueue(
+						repoId,
+						'repository-deleted',
+						targetCommitIds,
+						tx
+					);
+				}
+
 				await Promise.all(refs.map((ref) => this._refRepo.delete(ref, tx)));
 				await this._repoRepo.delete(repository, tx);
 				return true;
@@ -348,6 +419,35 @@ export class VersionControlService {
 		return this._commitRepo.get(commitId, transaction);
 	}
 
+	/** Gets a commit and its ancestors by following parent links.
+	 *
+	 * @param firstCommitId - The first commit to include in the chain.
+	 * @param count - The maximum number of commits to return.
+	 * @param transaction - Optional caller-owned transaction containing the commits store.
+	 * @returns The validated commits in newest-to-oldest order, including the starting commit.
+	 * @throws {VersionControlResourceNotFoundError|CommitAncestryCorruptError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the start commit is missing, ancestry is broken, a row is corrupt, or the read fails.
+	 */
+	getCommitParentChain(
+		firstCommitId: string,
+		count: number,
+		transaction?: ArcadiaTransaction
+	): Promise<Commit[]> {
+		log.trace('get commit parent chain enter', { firstCommitId });
+		return this._commitRepo.getParentChain(firstCommitId, count, transaction);
+	}
+
+	/** Gets globally shared commits that use the specified commit as their alternate.
+	 *
+	 * @param commitId - The commit used as the alternate target.
+	 * @param transaction - Optional caller-owned transaction containing the commits store.
+	 * @returns The validated commits that reference the target as their alternate.
+	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is corrupt or the index cannot be queried.
+	 */
+	getAllCommitsByAlternate(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit[]> {
+		log.trace('get all commits by alternate enter', { commitId });
+		return this._commitRepo.getAllByAlternate(commitId, transaction);
+	}
+
 	/**
 	 * Creates a named reference after verifying its repository and target commit exist.
 	 *
@@ -361,11 +461,11 @@ export class VersionControlService {
 	createRef(
 		repoId: string,
 		name: string,
-		targetCommitId: string,
+		targetCommitId?: string,
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Ref> {
 		log.trace('createRef enter', { repoId });
-		const input = v.parse(CreateDbRefParamSchema, { name, targetCommitId });
+		const input = v.parse(CreateDbRefParamSchema, { name, targetCommitId: targetCommitId ?? null });
 
 		return withTransaction(
 			this._db,
@@ -373,8 +473,11 @@ export class VersionControlService {
 			'readwrite',
 			transaction,
 			async (tx) => {
-				await this._requireRepository(repoId, tx);
-				await this._requireCommit(input.targetCommitId, tx);
+				await this.requireRepository(repoId, tx);
+				if (typeof input.targetCommitId === 'string') {
+					await this.requireCommit(input.targetCommitId, tx);
+				}
+
 				return this._refRepo.create(repoId, input, tx);
 			}
 		);
@@ -404,18 +507,18 @@ export class VersionControlService {
 	 * @param repoId - The owning repository ID.
 	 * @param refId - The reference ID to update.
 	 * @param name - The updated reference name, if changing it.
-	 * @param targetCommitId - The new target commit ID, if moving the ref.
+	 * @param targetCommitId - The new target commit ID, `null` to clear the target, or omitted to leave it unchanged.
 	 * @param transaction - Optional caller-owned transaction spanning the related stores.
-	 * @returns The updated reference, or `undefined` if it does not exist.
+	 * @returns The updated reference.
 	 * @throws {v.ValiError|VersionControlResourceNotFoundError|RepoCorruptError|RefCorruptError|CommitCorruptError|VersionControlOwnershipError|GarbageCollectionCorruptError|GarbageCollectionDatabaseError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when validation, linked-resource checks, or persistence fails.
 	 */
 	async updateRef(
 		repoId: string,
 		refId: string,
 		name?: string,
-		targetCommitId?: string,
+		targetCommitId?: string | null,
 		transaction?: ArcadiaTransaction<'readwrite'>
-	): Promise<Ref | undefined> {
+	): Promise<Ref> {
 		log.trace('updateRef enter', { repoId, refId });
 		const input = v.parse(UpdateDbRefParamSchema, {
 			...(name === undefined ? {} : { name }),
@@ -428,13 +531,15 @@ export class VersionControlService {
 			'readwrite',
 			transaction,
 			async (tx) => {
-				await this._requireRepository(repoId, tx);
-				const currentRef = await this._refRepo.get(repoId, refId, tx);
-				if (currentRef === undefined) return undefined;
+				await this.requireRepository(repoId, tx);
+				const currentRef = await this.requireRef(repoId, refId, tx);
 
-				const target = input.targetCommitId ?? currentRef.targetCommitId;
-				await this._requireCommit(target, tx);
-				if (target !== currentRef.targetCommitId) {
+				const target =
+					input.targetCommitId === undefined ? currentRef.targetCommitId : input.targetCommitId;
+				if (typeof input.targetCommitId === 'string') {
+					await this.requireCommit(input.targetCommitId, tx);
+				}
+				if (target !== currentRef.targetCommitId && typeof currentRef.targetCommitId === 'string') {
 					await this._garbageCollectionService.enqueue(
 						repoId,
 						'reference-moved',
@@ -464,42 +569,72 @@ export class VersionControlService {
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<boolean> {
 		log.trace('deleteRef enter', { repoId, refId });
-		const deleted = await withTransaction(
+		return withTransaction(
 			this._db,
 			['repos', 'refs', 'garbageJobs', 'garbageJobItems'],
 			'readwrite',
 			transaction,
 			async (tx) => {
-				if ((await this._repoRepo.get(repoId, tx)) === undefined) return false;
+				const repo = await this.getRepository(repoId, tx);
+				if (repo === undefined) return false;
 				const ref = await this._refRepo.get(repoId, refId, tx);
 				if (ref === undefined) return false;
-				await this._garbageCollectionService.enqueue(
-					repoId,
-					'reference-deleted',
-					[ref.targetCommitId],
-					tx
-				);
+
 				await this._refRepo.delete(ref, tx);
+				if (typeof ref.targetCommitId === 'string') {
+					await this._garbageCollectionService.enqueue(
+						repoId,
+						'reference-deleted',
+						[ref.targetCommitId],
+						tx
+					);
+				}
+				if (repo.defaultRefId === ref.id) {
+					await this._repoRepo.setDefaultRef(repo.id, null, tx);
+				}
 				return true;
 			}
 		);
-
-		return deleted;
 	}
 
-	/** Requires the requested repository to exist within the active transaction. */
-	private async _requireRepository(repoId: string, transaction: ArcadiaTransaction): Promise<Repo> {
-		const repository = await this._repoRepo.get(repoId, transaction);
-		if (repository !== undefined) return repository;
+	/** Gets a required repository row.
+	 *
+	 * @param repoId - The repository ID that must exist.
+	 * @param transaction - Optional caller-owned transaction containing the repository store.
+	 * @returns The validated repository row.
+	 * @throws {VersionControlResourceNotFoundError|RepoCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the repository is missing, corrupt, or cannot be read.
+	 */
+	async requireRepository(repoId: string, transaction?: ArcadiaTransaction): Promise<Repo> {
+		return await this._repoRepo.requireRepository(repoId, transaction);
+	}
 
-		const error = new VersionControlResourceNotFoundError('repo', repoId);
-		log.error('version-control repository not found', { err: error, repoId });
+	/** Gets a required ref scoped to its owning repository.
+	 *
+	 * @param repoId - The expected owning repository ID.
+	 * @param refId - The ref ID that must exist in that repository.
+	 * @param transaction - Optional caller-owned transaction containing the refs store.
+	 * @returns The validated ref.
+	 * @throws {VersionControlResourceNotFoundError|RefCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the ref is missing, corrupt, belongs to another repository, or cannot be read.
+	 */
+	async requireRef(repoId: string, refId: string, transaction?: ArcadiaTransaction): Promise<Ref> {
+		const ref = await this._refRepo.get(repoId, refId, transaction);
+		if (ref !== undefined) return ref;
+
+		const error = new VersionControlResourceNotFoundError('ref', refId);
+		log.error('version-control ref not found', { err: error, refId });
 		throw error;
 	}
 
-	/** Requires the requested commit to exist within the active transaction. */
-	private async _requireCommit(commitId: string, transaction: ArcadiaTransaction): Promise<void> {
-		if ((await this._commitRepo.get(commitId, transaction)) !== undefined) return;
+	/** Gets a required globally shared commit.
+	 *
+	 * @param commitId - The commit ID that must exist.
+	 * @param transaction - Optional caller-owned transaction containing the commits store.
+	 * @returns The validated commit.
+	 * @throws {VersionControlResourceNotFoundError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the commit is missing, corrupt, or cannot be read.
+	 */
+	async requireCommit(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit> {
+		const commit = await this._commitRepo.get(commitId, transaction);
+		if (commit !== undefined) return commit;
 
 		const error = new VersionControlResourceNotFoundError('commit', commitId);
 		log.error('version-control commit not found', { err: error, commitId });
@@ -517,7 +652,7 @@ export class VersionControlService {
 		]);
 
 		for (const commitId of linkedCommitIds) {
-			if (commitId !== null) await this._requireCommit(commitId, transaction);
+			if (commitId !== null) await this.requireCommit(commitId, transaction);
 		}
 	}
 }

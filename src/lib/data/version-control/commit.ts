@@ -21,7 +21,10 @@ import { AppError } from '#lib/error';
 import { getLogger } from '#lib/logger';
 import { CommitSchema, type Commit } from '#lib/model';
 
-import { throwVersionControlDatabaseFailure } from './version-control-errors';
+import {
+	throwVersionControlDatabaseFailure,
+	VersionControlResourceNotFoundError
+} from './version-control-errors';
 
 /** Validates fields accepted when creating a commit. */
 export const CreateDbCommitParamSchema = v.omit(CommitSchema, ['id', 'repoId', 'createdAt']);
@@ -43,6 +46,20 @@ export class CommitCorruptError extends AppError {
 		super(`Persisted commit is invalid: ${commitId}`);
 		this.commitId = commitId;
 		this.issues = issues;
+	}
+}
+
+/** Indicates that a persisted commit points to a missing parent commit. */
+export class CommitAncestryCorruptError extends AppError {
+	readonly kind = 'commit_ancestry_corrupt';
+	readonly commitId: string;
+	readonly missingParentCommitId: string;
+
+	/** Creates an error identifying the commit with the invalid parent link. */
+	constructor(commitId: string, missingParentCommitId: string) {
+		super(`Parent commit ${missingParentCommitId} for commit ${commitId} was not found`);
+		this.commitId = commitId;
+		this.missingParentCommitId = missingParentCommitId;
 	}
 }
 
@@ -118,15 +135,66 @@ export class CommitRepo {
 		return parseCommit(storedRow, commitId);
 	}
 
+	/** Gets a commit and its ancestors by following parent links.
+	 *
+	 * @param firstCommitId - The first commit to include in the chain.
+	 * @param count - The maximum number of commits to return.
+	 * @param transaction - Optional caller-owned transaction containing the commits store.
+	 * @returns The validated commits in newest-to-oldest order, including the starting commit.
+	 * @throws {VersionControlResourceNotFoundError|CommitAncestryCorruptError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the start commit is missing, ancestry is broken, a row is corrupt, or the read fails.
+	 */
+	async getParentChain(
+		firstCommitId: string,
+		count: number,
+		transaction?: ArcadiaTransaction
+	): Promise<Commit[]> {
+		log.trace('get parent chain enter', { firstCommitId, count });
+
+		try {
+			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) => {
+				const store = tx.objectStore('commits');
+
+				const commits: Commit[] = [];
+				let nextCursor: string | undefined = firstCommitId;
+
+				while (nextCursor !== undefined && commits.length < count) {
+					const commitId = nextCursor;
+					const storedRow: unknown = await store.get(commitId);
+
+					if (storedRow === undefined) {
+						if (commits.length === 0) {
+							const error = new VersionControlResourceNotFoundError('commit', commitId);
+							log.error('version-control commit not found', { err: error, commitId });
+							throw error;
+						}
+
+						const previousCommitId = commits.at(-1)?.id ?? firstCommitId;
+						const error = new CommitAncestryCorruptError(previousCommitId, commitId);
+						log.error('commit ancestry points to a missing commit', { err: error, commitId });
+						throw error;
+					}
+
+					const commit = parseCommit(storedRow, commitId);
+					commits.push(commit);
+					nextCursor = commit.parentCommitId ?? undefined;
+				}
+
+				return commits;
+			});
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(log, 'commit', 'read', firstCommitId, undefined, cause);
+		}
+	}
+
 	/**
 	 * Gets all commits that use the requested commit as their alternate.
 	 *
 	 * @param commitId - The commit used as the alternate target.
-	 * @param transaction - The active transaction containing the commits store.
+	 * @param transaction - Optional caller-owned transaction containing the commits store.
 	 * @returns The validated commits that reference the target as their alternate.
-	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError} when a row is invalid or the index cannot be queried.
+	 * @throws {CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is invalid or the index cannot be queried.
 	 */
-	async getAllByAlternate(commitId: string, transaction: ArcadiaTransaction): Promise<Commit[]> {
+	async getAllByAlternate(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit[]> {
 		try {
 			return await withTransaction(this._db, ['commits'], 'readonly', transaction, async (tx) => {
 				const commits: Commit[] = [];
