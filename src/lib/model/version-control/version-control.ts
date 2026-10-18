@@ -48,14 +48,10 @@ export const RepoAlternateSchema = v.strictObject({
 /** Validates the supported tagged payload variants stored in commits. */
 export const CommitDataSchema = v.variant('type', [ChatCommitDataSchema]);
 
-/** Validates globally shared commit identity, ancestry, alternate linkage, and payload.
- *
- * `repoId` is accepted only as legacy metadata on rows created before commits became shareable.
- */
+/** Validates globally shared commit identity, parent ancestry, and payload. */
 export const CommitSchema = v.strictObject({
 	id: v.string(),
 	parentCommitId: v.nullable(v.string()),
-	alternateOfCommitId: v.nullable(v.string()),
 	data: CommitDataSchema,
 	createdAt: v.number()
 });

@@ -12,7 +12,6 @@
  * const versionControl = await appState.getVersionControlService();
  * const prepared = await versionControl.prepareCommit({
  * 	parentCommitId: null,
- * 	alternateOfCommitId: null,
  * 	data: { type: 'chat-message', message: { sender: 'user', content: 'Hello' } }
  * });
  * const transaction = database.transaction(['commits'], 'readwrite');
@@ -45,7 +44,7 @@ import {
 	VersionControlResourceNotFoundError
 } from '#lib/data/version-control/version-control-errors.ts';
 
-const COMMIT_CONTENT_FORMAT = 'arcadia/version-control-commit/v2';
+const COMMIT_CONTENT_FORMAT = 'arcadia/version-control-commit/v3';
 const log = getLogger('service/version-control');
 const preparedCommits = new WeakSet<object>();
 
@@ -391,7 +390,10 @@ export class VersionControlService {
 						.filter(
 							(targetCommitId): targetCommitId is string => typeof targetCommitId === 'string'
 						),
-					...repoAlternates.map((alternate) => alternate.alternateCommitId)
+					...repoAlternates.flatMap((alternate) => [
+						alternate.alternateOfCommitId,
+						alternate.alternateCommitId
+					])
 				];
 				if (targetCommitIds.length > 0) {
 					await this._garbageCollectionService.enqueue(
@@ -436,7 +438,7 @@ export class VersionControlService {
 			throw error;
 		}
 
-		const commitId = `sha256:v2:${toHex(new Uint8Array(digest))}`;
+		const commitId = `sha256:v3:${toHex(new Uint8Array(digest))}`;
 		const preparedCommit = { commitId, createCommitParam: validatedParam };
 		freezeRecursively(preparedCommit);
 		preparedCommits.add(preparedCommit);
@@ -486,6 +488,7 @@ export class VersionControlService {
 	 *
 	 * @param repoId - The repository in which an alternate should be visible.
 	 * @param preparedCommit - The exact immutable object returned by `prepareCommit`.
+	 * @param alternateOfCommitId - The commit whose message this commit alternates, or `null` for a normal commit.
 	 * @param transaction - Optional caller-owned transaction spanning repositories, commits, and alternate links.
 	 * @returns The persisted global commit.
 	 * @throws {VersionControlResourceNotFoundError|VersionControlCommitNotPreparedError|VersionControlCommitConflictError|VersionControlAlternateMembershipError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the repository or linked data is invalid or persistence fails.
@@ -493,6 +496,7 @@ export class VersionControlService {
 	async createCommitForRepo(
 		repoId: string,
 		preparedCommit: PreparedCommit,
+		alternateOfCommitId: string | null,
 		transaction?: ArcadiaTransaction<'readwrite'>
 	): Promise<Commit> {
 		log.trace('create commit for repository enter', { repoId, commitId: preparedCommit.commitId });
@@ -505,8 +509,8 @@ export class VersionControlService {
 			async (tx) => {
 				await this.requireRepository(repoId, tx);
 				const commit = await this.createCommit(preparedCommit, tx);
-				if (commit.alternateOfCommitId !== null) {
-					await this.createRepoAlternate(repoId, commit.alternateOfCommitId, commit.id, tx);
+				if (alternateOfCommitId !== null) {
+					await this.createRepoAlternate(repoId, alternateOfCommitId, commit.id, tx);
 				}
 				return commit;
 			}
@@ -567,9 +571,12 @@ export class VersionControlService {
 			transaction,
 			async (tx) => {
 				await this.requireRepository(repoId, tx);
-				await this.requireCommit(alternateOfCommitId, tx);
+				const baseCommit = await this.requireCommit(alternateOfCommitId, tx);
 				const alternateCommit = await this.requireCommit(alternateCommitId, tx);
-				if (alternateCommit.alternateOfCommitId !== alternateOfCommitId) {
+				if (
+					alternateCommit.id === baseCommit.id ||
+					alternateCommit.parentCommitId !== baseCommit.parentCommitId
+				) {
 					throwVersionControlAlternateMembershipError(
 						repoId,
 						alternateOfCommitId,
@@ -608,7 +615,7 @@ export class VersionControlService {
 			transaction,
 			async (tx) => {
 				await this.requireRepository(repoId, tx);
-				await this.requireCommit(alternateOfCommitId, tx);
+				const baseCommit = await this.requireCommit(alternateOfCommitId, tx);
 				const repoAlternates: RepoAlternate[] = await this._repoAlternateRepo.getAllByAlternateOf(
 					repoId,
 					alternateOfCommitId,
@@ -617,7 +624,10 @@ export class VersionControlService {
 				return Promise.all(
 					repoAlternates.map(async (repoAlternate) => {
 						const commit = await this.requireCommit(repoAlternate.alternateCommitId, tx);
-						if (commit.alternateOfCommitId !== repoAlternate.alternateOfCommitId) {
+						if (
+							commit.id === baseCommit.id ||
+							commit.parentCommitId !== baseCommit.parentCommitId
+						) {
 							throwVersionControlAlternateMembershipError(
 								repoId,
 								repoAlternate.alternateOfCommitId,
@@ -871,10 +881,7 @@ export class VersionControlService {
 		preparedCommit: PreparedCommit,
 		transaction: ArcadiaTransaction<'readwrite'>
 	): Promise<void> {
-		const linkedCommitIds = new Set([
-			preparedCommit.createCommitParam.parentCommitId,
-			preparedCommit.createCommitParam.alternateOfCommitId
-		]);
+		const linkedCommitIds = new Set([preparedCommit.createCommitParam.parentCommitId]);
 
 		for (const commitId of linkedCommitIds) {
 			if (commitId !== null) await this.requireCommit(commitId, transaction);

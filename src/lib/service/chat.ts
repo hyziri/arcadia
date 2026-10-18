@@ -243,7 +243,7 @@ export class ChatService {
 	 * @param chatCatalogId - The catalog entry identifying the chat.
 	 * @param refId - The ref to advance.
 	 * @param message - The validated chat message to append.
-	 * @param alternateOfCommitId - Optional commit whose message this is an alternate for.
+	 * @param alternateOfCommit - Whether to create an alternate of the current ref head.
 	 * @returns The updated ref and the created history entry.
 	 * @throws {AppError|import('valibot').ValiError|DOMException} when validation, concurrency checks, or persistence fails.
 	 */
@@ -276,7 +276,6 @@ export class ChatService {
 		const preparedCommit = await this._versionControlService.prepareCommit({
 			parentCommitId:
 				altCommit === undefined ? (ref.targetCommitId ?? null) : altCommit.parentCommitId,
-			alternateOfCommitId: altCommit?.id ?? null,
 			data: {
 				type: 'chat-message',
 				message
@@ -315,6 +314,7 @@ export class ChatService {
 				const commit = await this._versionControlService.createCommitForRepo(
 					currentCatalog.chatRepoId,
 					preparedCommit,
+					altCommit?.id ?? null,
 					tx
 				);
 

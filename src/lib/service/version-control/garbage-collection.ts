@@ -16,7 +16,7 @@ import { CommitRepo, RefRepo, RepoAlternateRepo, VersionControlDatabaseError } f
 import { withTransaction, type ArcadiaTransaction, type Database } from '#lib/db';
 import { AppError, OperationTimeoutError } from '#lib/error';
 import { getLogger } from '#lib/logger';
-import type { Commit, GarbageJob, GarbageJobReason } from '#lib/model';
+import type { Commit, GarbageJob, GarbageJobReason, RepoAlternate } from '#lib/model';
 
 import { GarbageCollectionDatabaseError } from '../../data/version-control/garbage-errors';
 import { GarbageItemRepo } from '../../data/version-control/garbage-item';
@@ -172,13 +172,16 @@ export class GarbageCollectionService {
 			return true;
 		}
 
-		const alternateCommits = await this._commitRepo.getAllByAlternate(commit.id, transaction);
+		const [alternatesOfCommit, alternateLinks] = await Promise.all([
+			this._repoAlternateRepo.getAllByAlternateOfCommit(commit.id, transaction),
+			this._repoAlternateRepo.getAllByAlternateCommit(commit.id, transaction)
+		]);
 		await this._garbageItemRepo.enqueueCandidates(
 			job.id,
 			[
 				commit.parentCommitId,
-				commit.alternateOfCommitId,
-				...alternateCommits.map((alternateCommit) => alternateCommit.id)
+				...alternatesOfCommit.map((alternate: RepoAlternate) => alternate.alternateCommitId),
+				...alternateLinks.map((alternate: RepoAlternate) => alternate.alternateOfCommitId)
 			].filter((commitId): commitId is string => commitId !== null),
 			transaction
 		);
@@ -206,13 +209,18 @@ export class GarbageCollectionService {
 		if (commit === undefined) {
 			await this._garbageItemRepo.setState(job.id, item.commitId, 'collected', transaction);
 		} else {
-			const [refCount, parentCount, alternateCount, repoAlternateCount] = await Promise.all([
+			const [refCount, parentCount, alternateOfCount, alternateCommitCount] = await Promise.all([
 				this._refRepo.countByTargetCommit(item.commitId, transaction),
 				this._commitRepo.countByParent(item.commitId, transaction),
-				this._commitRepo.countByAlternate(item.commitId, transaction),
+				this._repoAlternateRepo.countByAlternateOfCommit(item.commitId, transaction),
 				this._repoAlternateRepo.countByAlternateCommit(item.commitId, transaction)
 			]);
-			if (refCount === 0 && parentCount === 0 && alternateCount === 0 && repoAlternateCount === 0) {
+			if (
+				refCount === 0 &&
+				parentCount === 0 &&
+				alternateOfCount === 0 &&
+				alternateCommitCount === 0
+			) {
 				await this._commitRepo.delete(commit, transaction);
 				await this._garbageItemRepo.setState(job.id, item.commitId, 'collected', transaction);
 				deleted = true;

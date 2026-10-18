@@ -54,6 +54,8 @@ export interface ArcadiaDbSchema extends DBSchema {
 			'by-repo': string;
 			/** Finds alternates of a commit that are visible in one repository. */
 			'by-repo-alternate-of': [string, string];
+			/** Finds all repository-scoped alternates of a commit. */
+			'by-alternate-of': string;
 			/** Finds repository memberships that keep an alternate commit live. */
 			'by-alternate-commit': string;
 		};
@@ -66,8 +68,6 @@ export interface ArcadiaDbSchema extends DBSchema {
 		indexes: {
 			/** Finds child commits; root commits with no parent are not indexed. */
 			'by-parent': string;
-			/** Finds commits that use another commit as an alternate. */
-			'by-alternate': string;
 		};
 	};
 

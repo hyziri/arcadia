@@ -184,6 +184,133 @@ export class RepoAlternateRepo {
 		}
 	}
 
+	/** Gets links to a base commit across all repositories.
+	 *
+	 * @param alternateOfCommitId - The base commit whose alternates are requested.
+	 * @param transaction - Optional caller-owned transaction containing the repository-alternate store.
+	 * @returns The validated links for the base commit.
+	 * @throws {RepoAlternateCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is invalid or the read fails.
+	 */
+	async getAllByAlternateOfCommit(
+		alternateOfCommitId: string,
+		transaction?: ArcadiaTransaction
+	): Promise<RepoAlternate[]> {
+		try {
+			return await withTransaction(
+				this._db,
+				['repoAlternates'],
+				'readonly',
+				transaction,
+				async (tx) => {
+					const rows: RepoAlternate[] = [];
+					let cursor = await tx
+						.objectStore('repoAlternates')
+						.index('by-alternate-of')
+						.openCursor(IDBKeyRange.only(alternateOfCommitId));
+					while (cursor !== null) {
+						rows.push(parseRepoAlternate(cursor.value, undefined, alternateOfCommitId));
+						cursor = await cursor.continue();
+					}
+					return rows;
+				}
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(
+				log,
+				'repo-alternate',
+				'read',
+				alternateOfCommitId,
+				undefined,
+				cause
+			);
+		}
+	}
+
+	/** Gets links where a commit is the alternate across all repositories.
+	 *
+	 * @param alternateCommitId - The alternate commit whose memberships are requested.
+	 * @param transaction - Optional caller-owned transaction containing the repository-alternate store.
+	 * @returns The validated links for the alternate commit.
+	 * @throws {RepoAlternateCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is invalid or the read fails.
+	 */
+	async getAllByAlternateCommit(
+		alternateCommitId: string,
+		transaction?: ArcadiaTransaction
+	): Promise<RepoAlternate[]> {
+		try {
+			return await withTransaction(
+				this._db,
+				['repoAlternates'],
+				'readonly',
+				transaction,
+				async (tx) => {
+					const rows: RepoAlternate[] = [];
+					let cursor = await tx
+						.objectStore('repoAlternates')
+						.index('by-alternate-commit')
+						.openCursor(IDBKeyRange.only(alternateCommitId));
+					while (cursor !== null) {
+						rows.push(parseRepoAlternate(cursor.value, undefined, undefined, alternateCommitId));
+						cursor = await cursor.continue();
+					}
+					return rows;
+				}
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(
+				log,
+				'repo-alternate',
+				'read',
+				alternateCommitId,
+				undefined,
+				cause
+			);
+		}
+	}
+
+	/** Counts live repository memberships where a commit is the base of an alternate link.
+	 *
+	 * @param alternateOfCommitId - The base commit whose memberships are counted.
+	 * @param transaction - Optional caller-owned transaction containing the repository-alternate store.
+	 * @returns The validated membership count.
+	 * @throws {RepoAlternateCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when a row is invalid or the read fails.
+	 */
+	async countByAlternateOfCommit(
+		alternateOfCommitId: string,
+		transaction?: ArcadiaTransaction
+	): Promise<number> {
+		try {
+			return await withTransaction(
+				this._db,
+				['repoAlternates'],
+				'readonly',
+				transaction,
+				async (tx) => {
+					let count = 0;
+					let cursor = await tx
+						.objectStore('repoAlternates')
+						.index('by-alternate-of')
+						.openCursor(IDBKeyRange.only(alternateOfCommitId));
+					while (cursor !== null) {
+						parseRepoAlternate(cursor.value, undefined, alternateOfCommitId);
+						count += 1;
+						cursor = await cursor.continue();
+					}
+					return count;
+				}
+			);
+		} catch (cause: unknown) {
+			throwVersionControlDatabaseFailure(
+				log,
+				'repo-alternate',
+				'read',
+				alternateOfCommitId,
+				undefined,
+				cause
+			);
+		}
+	}
+
 	/** Counts live repository memberships for one alternate commit.
 	 *
 	 * @param alternateCommitId - The alternate commit whose memberships are counted.
