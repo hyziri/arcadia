@@ -381,7 +381,12 @@ export class ChatService {
 			async (tx) => {
 				const catalog = await this._requireCatalog(chatCatalogId, tx);
 				const repo = await this._versionControlService.requireRepository(catalog.chatRepoId, tx);
-				const commit = await this._versionControlService.requireCommit(messageCommitId, tx);
+				const commit = await this._versionControlService.requireCommitOnRefHistory(
+					catalog.chatRepoId,
+					refId,
+					messageCommitId,
+					tx
+				);
 
 				const ref = await this._versionControlService.updateRef(
 					catalog.chatRepoId,
@@ -405,15 +410,16 @@ export class ChatService {
 		);
 	}
 
-	/** Creates a new branch at the supplied chat-message commit.
+	/** Creates a new branch at a commit in the source ref's history.
 	 *
 	 * @param chatCatalogId - The catalog entry identifying the chat.
+	 * @param sourceRefId - The ref whose history contains the selected commit.
 	 * @param messageCommitId - The commit to use as the new branch head.
 	 * @returns The created ref.
-	 * @throws {AppError|import('valibot').ValiError|DOMException} when the catalog, commit, or persistence operation fails.
+	 * @throws {AppError|import('valibot').ValiError|DOMException} when the catalog, source ref, commit history, or persistence operation is invalid.
 	 */
-	async createBranch(chatCatalogId: string, messageCommitId: string) {
-		log.trace('create branch enter', { chatCatalogId, messageCommitId });
+	async createBranch(chatCatalogId: string, sourceRefId: string, messageCommitId: string) {
+		log.trace('create branch enter', { chatCatalogId, sourceRefId, messageCommitId });
 
 		return withTransaction(
 			this._db,
@@ -422,7 +428,12 @@ export class ChatService {
 			undefined,
 			async (tx) => {
 				const catalog = await this._requireCatalog(chatCatalogId, tx);
-				const commit = await this._versionControlService.requireCommit(messageCommitId, tx);
+				const commit = await this._versionControlService.requireCommitOnRefHistory(
+					catalog.chatRepoId,
+					sourceRefId,
+					messageCommitId,
+					tx
+				);
 
 				const name = `${commit.data.message.sender}@${new Date(commit.createdAt).toISOString()}`;
 				return await this._versionControlService.createRef(

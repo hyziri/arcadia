@@ -78,6 +78,40 @@ export class VersionControlCommitConflictError extends AppError {
 	}
 }
 
+/** Indicates that a commit is not in the parent history of a reference. */
+export class VersionControlCommitNotOnRefHistoryError extends AppError {
+	readonly kind = 'version_control_commit_not_on_ref_history';
+	readonly repoId: string;
+	readonly refId: string;
+	readonly commitId: string;
+
+	/** Creates an error identifying the ref history that excludes a commit. */
+	constructor(repoId: string, refId: string, commitId: string) {
+		super(`Commit ${commitId} is not in ref ${refId} history for repository ${repoId}`);
+		this.repoId = repoId;
+		this.refId = refId;
+		this.commitId = commitId;
+	}
+}
+
+/** Indicates that a reference's parent chain contains a cycle. */
+export class VersionControlCommitAncestryCycleError extends AppError {
+	readonly kind = 'version_control_commit_ancestry_cycle';
+	readonly repoId: string;
+	readonly refId: string;
+	readonly commitId: string;
+
+	/** Creates an error identifying a cycle in a ref's parent chain. */
+	constructor(repoId: string, refId: string, commitId: string) {
+		super(
+			`Commit ancestry for ref ${refId} in repository ${repoId} contains a cycle at ${commitId}`
+		);
+		this.repoId = repoId;
+		this.refId = refId;
+		this.commitId = commitId;
+	}
+}
+
 /** Indicates that a commit was not produced by `prepareCommit`. */
 export class VersionControlCommitNotPreparedError extends AppError {
 	readonly kind = 'version_control_commit_not_prepared';
@@ -628,17 +662,59 @@ export class VersionControlService {
 	/** Gets a required globally shared commit.
 	 *
 	 * @param commitId - The commit ID that must exist.
-	 * @param transaction - Optional caller-owned transaction containing the commits store.
+	 * @param tx - Optional caller-owned transaction containing the commits store.
 	 * @returns The validated commit.
 	 * @throws {VersionControlResourceNotFoundError|CommitCorruptError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the commit is missing, corrupt, or cannot be read.
 	 */
-	async requireCommit(commitId: string, transaction?: ArcadiaTransaction): Promise<Commit> {
-		const commit = await this._commitRepo.get(commitId, transaction);
+	async requireCommit(commitId: string, tx?: ArcadiaTransaction): Promise<Commit> {
+		const commit = await this._commitRepo.get(commitId, tx);
 		if (commit !== undefined) return commit;
 
 		const error = new VersionControlResourceNotFoundError('commit', commitId);
 		log.error('version-control commit not found', { err: error, commitId });
 		throw error;
+	}
+
+	/** Gets a commit only if it is on the parent chain of the specified ref.
+	 *
+	 * @param repoId - The repository that owns the ref.
+	 * @param refId - The ref whose history is checked.
+	 * @param commitId - The commit that must occur in the ref's parent history.
+	 * @param tx - Optional caller-owned transaction containing the refs and commits stores.
+	 * @returns The validated commit from the ref's history.
+	 * @throws {VersionControlResourceNotFoundError|VersionControlCommitNotOnRefHistoryError|VersionControlCommitAncestryCycleError|RefCorruptError|CommitCorruptError|VersionControlOwnershipError|VersionControlDatabaseError|TransactionScopeError|OperationTimeoutError} when the ref or commit is missing, the commit is outside the ref history, ancestry is cyclic, or a read fails.
+	 */
+	async requireCommitOnRefHistory(
+		repoId: string,
+		refId: string,
+		commitId: string,
+		tx?: ArcadiaTransaction
+	): Promise<Commit> {
+		log.trace('require commit on ref history enter', { repoId, refId, commitId });
+
+		return withTransaction(this._db, ['refs', 'commits'], 'readonly', tx, async (transaction) => {
+			const ref = await this.requireRef(repoId, refId, transaction);
+			const requestedCommit = await this.requireCommit(commitId, transaction);
+			let currentCommitId = ref.targetCommitId;
+			const visitedCommitIds = new Set<string>();
+
+			while (currentCommitId !== null) {
+				if (currentCommitId === requestedCommit.id) return requestedCommit;
+				if (visitedCommitIds.has(currentCommitId)) {
+					const error = new VersionControlCommitAncestryCycleError(repoId, refId, currentCommitId);
+					log.error('cycle in ref ancestry while validating commit history', { err: error });
+					throw error;
+				}
+
+				visitedCommitIds.add(currentCommitId);
+				const currentCommit = await this.requireCommit(currentCommitId, transaction);
+				currentCommitId = currentCommit.parentCommitId;
+			}
+
+			const error = new VersionControlCommitNotOnRefHistoryError(repoId, refId, commitId);
+			log.error('commit is not in ref history', { err: error });
+			throw error;
+		});
 	}
 
 	/** Ensures every non-null ancestry link points to a globally stored commit. */
