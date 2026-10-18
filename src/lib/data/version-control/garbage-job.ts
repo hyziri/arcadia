@@ -45,6 +45,8 @@ export class GarbageJobRepo {
 			reason,
 			status: 'discovering',
 			submittedAt: Date.now(),
+			completedAt: null,
+			sweepCursor: null,
 			sweepDeleted: false
 		});
 
@@ -144,7 +146,7 @@ export class GarbageJobRepo {
 	resetSweepPass(jobId: string, transaction: ArcadiaTransaction<'readwrite'>): Promise<void> {
 		return this._update(jobId, transaction, (job) => ({
 			...job,
-			sweepCursor: undefined,
+			sweepCursor: null,
 			sweepDeleted: false
 		}));
 	}
@@ -166,7 +168,7 @@ export class GarbageJobRepo {
 		return this._update(jobId, transaction, (job) => ({
 			...job,
 			status,
-			...(status === 'cleaning' ? { sweepCursor: undefined, sweepDeleted: false } : {})
+			...(status === 'cleaning' ? { sweepCursor: null, sweepDeleted: false } : {})
 		}));
 	}
 
@@ -183,7 +185,7 @@ export class GarbageJobRepo {
 			...job,
 			status: 'completed',
 			completedAt: Date.now(),
-			sweepCursor: undefined
+			sweepCursor: null
 		}));
 	}
 

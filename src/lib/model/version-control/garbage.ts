@@ -16,8 +16,8 @@ export const GarbageJobSchema = v.strictObject({
 	reason: GarbageJobReasonSchema,
 	status: v.picklist(['discovering', 'sweeping', 'cleaning', 'completed']),
 	submittedAt: v.number(),
-	completedAt: v.optional(v.number()),
-	sweepCursor: v.optional(v.string()),
+	completedAt: v.nullable(v.number()),
+	sweepCursor: v.nullable(v.string()),
 	sweepDeleted: v.boolean()
 });
 

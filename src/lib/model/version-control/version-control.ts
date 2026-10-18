@@ -47,7 +47,6 @@ export const CommitDataSchema = v.variant('type', [ChatCommitDataSchema]);
  */
 export const CommitSchema = v.strictObject({
 	id: v.string(),
-	repoId: v.optional(v.string()),
 	parentCommitId: v.nullable(v.string()),
 	alternateOfCommitId: v.nullable(v.string()),
 	data: CommitDataSchema,

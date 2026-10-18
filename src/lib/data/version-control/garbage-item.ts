@@ -152,7 +152,7 @@ export class GarbageItemRepo {
 	 */
 	getNextCandidate(
 		jobId: string,
-		cursorCommitId: string | undefined,
+		cursorCommitId: string | null,
 		transaction: ArcadiaTransaction<'readwrite'>
 	): Promise<GarbageJobItem | undefined> {
 		return this._findAfter(jobId, cursorCommitId, false, transaction);
@@ -169,7 +169,7 @@ export class GarbageItemRepo {
 	 */
 	getNext(
 		jobId: string,
-		cursorCommitId: string | undefined,
+		cursorCommitId: string | null,
 		transaction: ArcadiaTransaction<'readwrite'>
 	): Promise<GarbageJobItem | undefined> {
 		return this._findAfter(jobId, cursorCommitId, true, transaction);
@@ -201,7 +201,7 @@ export class GarbageItemRepo {
 	/** Finds the next job-scoped work item while optionally skipping collected items. */
 	private async _findAfter(
 		jobId: string,
-		cursorCommitId: string | undefined,
+		cursorCommitId: string | null,
 		includeCollected: boolean,
 		transaction: ArcadiaTransaction<'readwrite'>
 	): Promise<GarbageJobItem | undefined> {
@@ -268,11 +268,11 @@ function parseGarbageJobItem(
 async function findItemAfter(
 	transaction: ArcadiaTransaction<'readwrite'>,
 	jobId: string,
-	cursorCommitId: string | undefined,
+	cursorCommitId: string | null,
 	includeCollected: boolean
 ): Promise<GarbageJobItem | undefined> {
 	const range =
-		cursorCommitId === undefined
+		cursorCommitId === null
 			? IDBKeyRange.bound([jobId], [jobId, []])
 			: IDBKeyRange.lowerBound([jobId, cursorCommitId], true);
 	let cursor = await transaction.objectStore('garbageJobItems').openCursor(range);

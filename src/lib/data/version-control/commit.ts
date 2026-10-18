@@ -27,7 +27,7 @@ import {
 } from './version-control-errors';
 
 /** Validates fields accepted when creating a commit. */
-export const CreateDbCommitParamSchema = v.omit(CommitSchema, ['id', 'repoId', 'createdAt']);
+export const CreateDbCommitParamSchema = v.omit(CommitSchema, ['id', 'createdAt']);
 
 /** Fields required to create a commit. */
 export type CreateDbCommitParam = v.InferOutput<typeof CreateDbCommitParamSchema>;
