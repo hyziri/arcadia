@@ -1,17 +1,17 @@
 <script lang="ts">
-	import type { ChatMessage } from '#lib/model';
+	import type { ChatMessageView } from '#lib/state';
 
-	import { default as ChatMessageView } from './ChatMessage.svelte';
+	import ChatMessageComponent from './ChatMessage.svelte';
 
 	interface Props {
-		messages: ChatMessage[];
+		messages: ChatMessageView[];
 	}
 
 	let { messages }: Props = $props();
 </script>
 
 <div class="flex flex-1 flex-col gap-2 overflow-y-auto">
-	{#each messages as message (message)}
-		<ChatMessageView {message} />
+	{#each messages as message (message.viewId)}
+		<ChatMessageComponent {message} />
 	{/each}
 </div>

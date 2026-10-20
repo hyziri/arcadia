@@ -2,7 +2,7 @@
 
 import { getDatabase, type Database, type DatabasePromise } from '#lib/db';
 import { getLogger } from '#lib/logger';
-import { SettingsService, LlmService, VersionControlService } from '#lib/service';
+import { SettingsService, LlmService, VersionControlService, ChatService } from '#lib/service';
 
 import { GarbageCollectionService } from '../service/version-control/garbage-collection';
 
@@ -14,6 +14,7 @@ export class AppState {
 	private _db: DatabasePromise | undefined;
 	private _settingsService: SettingsService | undefined;
 	private _llmService: LlmService | undefined;
+	private _chatService: ChatService | undefined;
 	private _versionControlService: VersionControlService | undefined;
 	private _garbageCollectionService: GarbageCollectionService | undefined;
 	private _recoveryScheduled = false;
@@ -85,12 +86,29 @@ export class AppState {
 	}
 
 	/**
+	 * Returns the shared chat service.
+	 *
+	 * @returns The lazily initialized chat service.
+	 * @throws {Error|DOMException} when the database cannot be opened.
+	 */
+	async getChatService(): Promise<ChatService> {
+		log.trace('getChatService enter');
+		if (this._chatService !== undefined) return this._chatService;
+
+		const database = await this.initialize();
+		return (this._chatService ??= new ChatService(
+			database,
+			await this._getVersionControlService()
+		));
+	}
+
+	/**
 	 * Returns the shared version-control service.
 	 *
 	 * @returns The lazily initialized version-control service.
 	 * @throws {Error|DOMException} when the database cannot be opened.
 	 */
-	async getVersionControlService(): Promise<VersionControlService> {
+	private async _getVersionControlService(): Promise<VersionControlService> {
 		log.trace('getVersionControlService enter');
 		if (this._versionControlService !== undefined) return this._versionControlService;
 

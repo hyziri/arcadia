@@ -176,6 +176,38 @@ export class ChatService {
 		return await this._chatCatalogRepo.getRecent(pagination);
 	}
 
+	/** Gets a chat catalog, its repository, and a selected ref.
+	 *
+	 * When no ref ID is provided, the repository's default ref is returned if one exists.
+	 *
+	 * @param chatCatalogId - The catalog entry identifying the chat.
+	 * @param refId - The optional ref to retrieve instead of the default ref.
+	 * @returns The catalog entry, repository, and selected ref, or `null` if no default ref exists.
+	 * @throws {AppError|import('valibot').ValiError|DOMException} when the catalog, repository, ref, or persistence read fails.
+	 */
+	async getChatById(
+		chatCatalogId: string,
+		refId?: string
+	): Promise<{ catalog: ChatCatalog; repo: Repo; ref: Ref | null }> {
+		return await withTransaction(
+			this._db,
+			['chatCatalog', 'repos', 'refs'],
+			'readonly',
+			undefined,
+			async (tx) => {
+				const catalog = await this._requireCatalog(chatCatalogId, tx);
+				const repo = await this._versionControlService.requireRepository(catalog.chatRepoId, tx);
+				const ref = refId
+					? await this._versionControlService.requireRef(repo.id, refId, tx)
+					: repo.defaultRefId === null
+						? null
+						: await this._versionControlService.requireRef(repo.id, repo.defaultRefId, tx);
+
+				return { catalog, repo, ref };
+			}
+		);
+	}
+
 	/** Sets a chat repository's default ref and synchronizes the catalog's latest-message pointer.
 	 *
 	 * @param chatCatalogId - The catalog entry identifying the chat.
@@ -244,7 +276,7 @@ export class ChatService {
 	 * @param refId - The ref to advance.
 	 * @param message - The validated chat message to append.
 	 * @param alternateOfCommit - Whether to create an alternate of the current ref head.
-	 * @returns The updated ref and the created history entry.
+	 * @returns The created history entry.
 	 * @throws {AppError|import('valibot').ValiError|DOMException} when validation, concurrency checks, or persistence fails.
 	 */
 	async addMessage(
@@ -252,35 +284,18 @@ export class ChatService {
 		refId: string,
 		message: ChatMessage,
 		alternateOfCommit: boolean = false
-	): Promise<[Ref, ChatHistoryEntry]> {
+	): Promise<ChatHistoryEntry> {
 		log.trace('Add message enter', { chatCatalogId, refId });
 
-		const { catalog, ref, altCommit } = await withTransaction(
-			this._db,
-			['chatCatalog', 'repos', 'refs', 'commits'],
-			'readonly',
-			undefined,
-			async (tx) => {
-				let altCommit = undefined;
-				const catalog = await this._requireCatalog(chatCatalogId, tx);
-				const ref = await this._versionControlService.requireRef(catalog.chatRepoId, refId, tx);
-
-				if (alternateOfCommit && ref.targetCommitId !== null) {
-					altCommit = await this._versionControlService.requireCommit(ref.targetCommitId, tx);
-				}
-
-				return { catalog, ref, altCommit };
+		const { catalog, ref, alternateOfCommitId, preparedCommit } = await this._prepareMessageCommit(
+			chatCatalogId,
+			refId,
+			message,
+			{
+				kind: 'append',
+				alternateOfCurrentHead: alternateOfCommit
 			}
 		);
-
-		const preparedCommit = await this._versionControlService.prepareCommit({
-			parentCommitId:
-				altCommit === undefined ? (ref.targetCommitId ?? null) : altCommit.parentCommitId,
-			data: {
-				type: 'chat-message',
-				message
-			}
-		});
 
 		return withTransaction(
 			this._db,
@@ -314,11 +329,11 @@ export class ChatService {
 				const commit = await this._versionControlService.createCommitForRepo(
 					currentCatalog.chatRepoId,
 					preparedCommit,
-					altCommit?.id ?? null,
+					alternateOfCommitId,
 					tx
 				);
 
-				const updatedRef = await this._versionControlService.updateRef(
+				await this._versionControlService.updateRef(
 					currentCatalog.chatRepoId,
 					refId,
 					undefined,
@@ -326,17 +341,111 @@ export class ChatService {
 					tx
 				);
 
-				if (repo.defaultRefId === updatedRef.id) {
+				if (repo.defaultRefId === refId) {
 					await this._chatCatalogRepo.update(catalog.chatRepoId, chatCatalogId, commit.id, tx);
 				}
 
-				return [
-					updatedRef,
-					{
-						commitId: commit.id,
-						message: commit.data.message
-					}
-				];
+				return {
+					commitId: commit.id,
+					message: commit.data.message
+				};
+			}
+		);
+	}
+
+	/** Replaces a selected message and truncates any later history from the ref.
+	 *
+	 * The replacement commit reuses the selected message's parent and advances the ref in the same
+	 * transaction, so a failed replacement leaves the original history intact. The selected commit
+	 * must still be reachable from the ref when the write transaction begins.
+	 *
+	 * @param chatCatalogId - The catalog entry identifying the chat.
+	 * @param refId - The ref whose visible message history is being replaced.
+	 * @param messageCommitId - The existing message commit to replace.
+	 * @param message - The new message content.
+	 * @returns The replacement history entry.
+	 * @throws {AppError|import('valibot').ValiError|DOMException} when the selected commit is not on the ref history, the ref changes, or persistence fails.
+	 */
+	async replaceMessage(
+		chatCatalogId: string,
+		refId: string,
+		messageCommitId: string,
+		message: ChatMessage
+	): Promise<ChatHistoryEntry> {
+		log.trace('replace message enter', { chatCatalogId, refId, messageCommitId });
+
+		const { catalog, ref, preparedCommit } = await this._prepareMessageCommit(
+			chatCatalogId,
+			refId,
+			message,
+			{ kind: 'replace', messageCommitId }
+		);
+
+		return withTransaction(
+			this._db,
+			[
+				'chatCatalog',
+				'repos',
+				'refs',
+				'commits',
+				'repoAlternates',
+				'garbageJobItems',
+				'garbageJobs'
+			],
+			'readwrite',
+			undefined,
+			async (tx) => {
+				const currentCatalog = await this._requireCatalog(chatCatalogId, tx);
+				if (currentCatalog.chatRepoId !== catalog.chatRepoId) {
+					throwChatRepoChangedError(chatCatalogId, catalog.chatRepoId, currentCatalog.chatRepoId);
+				}
+
+				const currentRef = await this._versionControlService.requireRef(
+					currentCatalog.chatRepoId,
+					refId,
+					tx
+				);
+				if (currentRef.targetCommitId !== ref.targetCommitId) {
+					throwRefTargetChangedError(refId, ref.targetCommitId, currentRef.targetCommitId);
+				}
+
+				await this._versionControlService.requireCommitOnRefHistory(
+					currentCatalog.chatRepoId,
+					refId,
+					messageCommitId,
+					tx
+				);
+				const repo = await this._versionControlService.requireRepository(
+					currentCatalog.chatRepoId,
+					tx
+				);
+				const commit = await this._versionControlService.createCommitForRepo(
+					currentCatalog.chatRepoId,
+					preparedCommit,
+					null,
+					tx
+				);
+				await this._versionControlService.updateRef(
+					currentCatalog.chatRepoId,
+					refId,
+					undefined,
+					commit.id,
+					tx
+				);
+
+				if (repo.defaultRefId === refId) {
+					await this._chatCatalogRepo.update(
+						currentCatalog.chatRepoId,
+						chatCatalogId,
+						commit.id,
+						tx
+					);
+				}
+
+				return {
+					commitId: commit.id,
+					message: commit.data.message
+				};
 			}
 		);
 	}
@@ -512,6 +621,68 @@ export class ChatService {
 				}
 			}
 		);
+	}
+
+	/** Reads ref ancestry and hashes the message payload before opening a write transaction. */
+	private async _prepareMessageCommit(
+		chatCatalogId: string,
+		refId: string,
+		message: ChatMessage,
+		mode:
+			| { kind: 'append'; alternateOfCurrentHead: boolean }
+			| { kind: 'replace'; messageCommitId: string }
+	): Promise<{
+		catalog: ChatCatalog;
+		ref: Ref;
+		alternateOfCommitId: string | null;
+		preparedCommit: Awaited<ReturnType<VersionControlService['prepareCommit']>>;
+	}> {
+		const context = await withTransaction(
+			this._db,
+			['chatCatalog', 'repos', 'refs', 'commits'],
+			'readonly',
+			undefined,
+			async (tx) => {
+				const catalog = await this._requireCatalog(chatCatalogId, tx);
+				const ref = await this._versionControlService.requireRef(catalog.chatRepoId, refId, tx);
+				let parentCommitId = ref.targetCommitId;
+				let alternateOfCommitId: string | null = null;
+
+				if (mode.kind === 'replace') {
+					const replacedCommit = await this._versionControlService.requireCommitOnRefHistory(
+						catalog.chatRepoId,
+						refId,
+						mode.messageCommitId,
+						tx
+					);
+					parentCommitId = replacedCommit.parentCommitId;
+				} else if (mode.alternateOfCurrentHead && ref.targetCommitId !== null) {
+					const alternateCommit = await this._versionControlService.requireCommit(
+						ref.targetCommitId,
+						tx
+					);
+					parentCommitId = alternateCommit.parentCommitId;
+					alternateOfCommitId = alternateCommit.id;
+				}
+
+				return { catalog, ref, parentCommitId, alternateOfCommitId };
+			}
+		);
+
+		const preparedCommit = await this._versionControlService.prepareCommit({
+			parentCommitId: context.parentCommitId,
+			data: {
+				type: 'chat-message',
+				message
+			}
+		});
+
+		return {
+			catalog: context.catalog,
+			ref: context.ref,
+			alternateOfCommitId: context.alternateOfCommitId,
+			preparedCommit
+		};
 	}
 
 	/** Resolves a required catalog within the supplied workflow transaction. */

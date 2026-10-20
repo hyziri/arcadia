@@ -10,3 +10,4 @@ export {
 	VersionControlService
 } from './version-control';
 export type { ForkedRepository, PreparedCommit } from './version-control';
+export { GarbageCollectionService } from './garbage-collection';

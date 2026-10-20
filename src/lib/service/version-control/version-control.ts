@@ -7,9 +7,11 @@
  * @example
  * ```ts
  * import { appState } from '#lib/state';
+ * import { GarbageCollectionService, VersionControlService } from '#lib/service';
  *
  * const database = await appState.initialize();
- * const versionControl = await appState.getVersionControlService();
+ * const garbageCollection = new GarbageCollectionService(database);
+ * const versionControl = new VersionControlService(database, garbageCollection);
  * const prepared = await versionControl.prepareCommit({
  * 	parentCommitId: null,
  * 	data: { type: 'chat-message', message: { sender: 'user', content: 'Hello' } }

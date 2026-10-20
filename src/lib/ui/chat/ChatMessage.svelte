@@ -1,8 +1,8 @@
 <script lang="ts">
-	import type { ChatMessage } from '#lib/model';
+	import type { ChatMessageView } from '#lib/state';
 
 	interface Props {
-		message: ChatMessage;
+		message: ChatMessageView;
 	}
 
 	let { message }: Props = $props();

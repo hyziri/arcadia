@@ -1,16 +1,25 @@
 <script lang="ts">
 	import { CircleStop, Menu, MessageSquarePlus, RotateCcw, Send } from '@lucide/svelte';
 
+	import { ChatState, type ChatStateType } from '#lib/state';
+
 	interface Props {
-		isGenerating: boolean;
+		isLoading: boolean;
+		chatState: ChatStateType;
 		onNewChat: () => void;
-		onSendMessage: (message: string) => void;
+		onSendMessage: (message: string) => Promise<boolean>;
 		onRegenerateMessage: () => void;
 		onStopGeneration: () => void;
 	}
 
-	let { isGenerating, onNewChat, onSendMessage, onRegenerateMessage, onStopGeneration }: Props =
-		$props();
+	let {
+		isLoading,
+		chatState,
+		onNewChat,
+		onSendMessage,
+		onRegenerateMessage,
+		onStopGeneration
+	}: Props = $props();
 
 	let message = $state('');
 	let isActionMenuOpen = $state(false);
@@ -19,19 +28,26 @@
 	let actionMenuContainer: HTMLDivElement;
 	let actionMenuTrigger: HTMLButtonElement;
 
-	/** Trims and sends the message if it contains non-whitespace text, then clears the input. */
-	function sendMessage() {
-		const trimmedMessage = message.trim();
-		if (!trimmedMessage) return;
+	/** Clears the submitted draft only after its user message is persisted. */
+	async function sendMessage(): Promise<void> {
+		const submittedMessage = message;
+		const trimmedMessage = submittedMessage.trim();
+		if (isLoading || chatState === ChatState.Sending || !trimmedMessage) return;
 
-		onSendMessage(trimmedMessage);
-		message = '';
+		const isPersisted = await onSendMessage(trimmedMessage);
+		if (isPersisted && message === submittedMessage) message = '';
 	}
 
 	/** Adjusts the textarea height to fit its current content without a scrollbar. */
 	function resizeTextarea() {
 		textarea.style.height = '0px';
 		textarea.style.height = `${textarea.scrollHeight}px`;
+	}
+
+	/** Closes the action menu and starts a new chat. */
+	function startNewChat() {
+		closeActionMenu(true);
+		onNewChat();
 	}
 
 	/** Invokes the regenerate action after closing the menu. */
@@ -99,8 +115,8 @@
 				<button
 					class="btn w-full justify-start gap-2 btn-ghost"
 					type="button"
-					disabled={isGenerating}
-					onclick={onNewChat}
+					disabled={chatState !== ChatState.Idle}
+					onclick={startNewChat}
 				>
 					<MessageSquarePlus size={18} />
 					<span>New Chat</span>
@@ -108,7 +124,7 @@
 				<button
 					class="btn w-full justify-start gap-2 btn-ghost"
 					type="button"
-					disabled={isGenerating}
+					disabled={isLoading || chatState !== ChatState.Idle}
 					onclick={regenerateMessage}
 				>
 					<RotateCcw size={18} />
@@ -122,7 +138,7 @@
 		bind:value={message}
 		class="textarea h-10 max-h-[40dvh] min-h-0 w-full resize-none overflow-y-auto"
 		onkeydown={handleKeydown}></textarea>
-	{#if isGenerating}
+	{#if chatState === ChatState.Generating}
 		<button
 			class="btn btn-square btn-ghost"
 			type="button"
@@ -136,6 +152,7 @@
 			class="btn btn-square btn-ghost"
 			type="button"
 			aria-label="Send message"
+			disabled={isLoading || chatState === ChatState.Sending}
 			onclick={sendMessage}
 		>
 			<Send size={24} />
