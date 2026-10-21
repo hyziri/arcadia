@@ -31,7 +31,7 @@
 	<ChatHistory messages={chatSession.messages} />
 	<ChatControls
 		isLoading={chatSession.isLoading}
-		chatState={chatSession.chatState}
+		generationState={chatSession.generationState}
 		onNewChat={() => chatSession.newChat()}
 		onSendMessage={(content) =>
 			runChatAction(async () => {

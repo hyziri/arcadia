@@ -2,8 +2,8 @@ export { appState, AppState } from './app.svelte.ts';
 export {
 	ChatSession,
 	ChatGenerationAndPersistenceError,
-	ChatState,
-	type ChatState as ChatStateType,
+	GenerationState,
+	type GenerationState as GenerationStateType,
 	type ChatMessageView
 } from './chat.svelte.ts';
 export { getDialogContext, setDialogContext, type DialogController } from './dialog';

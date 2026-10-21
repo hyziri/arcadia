@@ -37,12 +37,14 @@ interface ActiveChat {
 	messages: ChatMessageView[];
 }
 
-export const ChatState = {
+/** States for the chat session's message-sending and response-generation workflow. */
+export const GenerationState = {
 	Idle: 'idle',
 	Sending: 'sending',
 	Generating: 'generating'
 };
-export type ChatState = (typeof ChatState)[keyof typeof ChatState];
+/** The current send or response-generation state of a chat session. */
+export type GenerationState = (typeof GenerationState)[keyof typeof GenerationState];
 
 /** Indicates that response generation failed and the partial response could not be saved. */
 export class ChatGenerationAndPersistenceError extends AppError {
@@ -70,17 +72,18 @@ const DEFAULT_MESSAGES_PER_PAGE = 20;
 
 /** Owns the active chat view and coordinates persistence with streamed response generation. */
 export class ChatSession {
-	chatState = $state(ChatState.Idle);
+	/** Current state of the session's send or response-generation workflow. */
+	generationState = $state(GenerationState.Idle);
 
 	private readonly _resolveChatService: () => Promise<ChatService>;
 	private readonly _resolveLlmService: () => Promise<LlmService>;
 	private _activeChatState: LoadStateType<ActiveChat | null> = $state({
 		state: LoadState.NotLoaded
 	});
-	/** Invalidates asynchronous results from older chat loads, switches, or generations. */
-	private _activeChatRevision = 0;
 	private _chatLoadPromise: Promise<void> | undefined;
 	private _abortController: AbortController | null = null;
+	/** Invalidates asynchronous results from older chat loads, switches, or generations. */
+	private _activeChatRevision = 0;
 
 	/** Creates a chat session backed by lazily resolved chat and LLM services.
 	 *
@@ -97,7 +100,7 @@ export class ChatSession {
 
 	/** Clears the active selection; the next sent message creates a new persisted chat.	 */
 	newChat(): void {
-		if (this.chatState !== ChatState.Idle) return;
+		if (this.generationState !== GenerationState.Idle) return;
 
 		this._activeChatRevision += 1;
 		this._chatLoadPromise = undefined;
@@ -189,7 +192,8 @@ export class ChatSession {
 	/** Persists a user message while preventing overlapping sends or response generation.
 	 *
 	 * @param content - The user's message text.
-	 * @returns Whether the user message was persisted.
+	 * @returns Whether the message was persisted and its originating chat remained current.
+	 * @throws {AppError|DOMException|import('valibot').ValiError} when chat creation or message persistence fails.
 	 */
 	async sendMessage(content: string): Promise<boolean> {
 		const trimmedContent = content.trim();
@@ -197,208 +201,214 @@ export class ChatSession {
 			!trimmedContent ||
 			this._activeChatState.state === LoadState.Loading ||
 			this._activeChatState.state === LoadState.Error ||
-			this.chatState !== ChatState.Idle
+			this.generationState !== GenerationState.Idle
 		)
 			return false;
 
-		this.chatState = ChatState.Sending;
+		this.generationState = GenerationState.Sending;
 		try {
-			return await this._addMessage({ sender: 'user', content: trimmedContent });
+			const revision = ++this._activeChatRevision;
+			const activeChat = await this._ensureActiveChat(revision);
+			if (activeChat === undefined) return false;
+			if (!this._isCurrentChat(activeChat, revision)) return false;
+
+			const persistedMessage = await this._persistMessage(activeChat, {
+				sender: 'user',
+				content: trimmedContent
+			});
+			if (!this._isCurrentChat(activeChat, revision)) return false;
+			this._appendPersistedMessage(activeChat, persistedMessage);
+			return true;
 		} finally {
-			this.chatState = ChatState.Idle;
+			this.generationState = GenerationState.Idle;
 		}
 	}
 
-	/** Generates and persists an assistant response for the active chat, if one is available.
+	/** Regenerates the final assistant message, or generates a new response when the history has no replaceable assistant tail.
 	 *
-	 * @returns Resolves when generation finishes or is ignored because no chat is active, sending, or already generating.
-	 * @throws {AppError|DOMException} when generation or persistence fails.
-	 */
-	async generateResponse(): Promise<void> {
-		if (this.chatState !== ChatState.Idle) return;
-		return this._generateAssistantResponse(undefined);
-	}
-
-	/** Replaces the final assistant response, or responds to the full history when the tail is a user message.
-	 *
-	 * @returns Resolves when generation finishes or is ignored because no chat is active, sending, or already generating.
-	 * @throws {AppError|DOMException} when generation or persistence fails.
+	 * @returns Resolves after generation and persistence complete, or when no loaded chat is available or generation is already active.
+	 * @throws {AppError|DOMException|import('valibot').ValiError} when generation or persistence fails.
 	 */
 	async regenerateResponse(): Promise<void> {
-		const state = this._activeChatState;
-		if (
-			state.state === LoadState.Loading ||
-			state.state === LoadState.Error ||
-			this.chatState !== ChatState.Idle
-		)
-			return;
+		if (this.generationState !== GenerationState.Idle) return;
 
-		if (state.state === LoadState.NotLoaded || state.data === null) {
-			const revision = ++this._activeChatRevision;
+		const activeChatState = this._activeChatState;
+		if (activeChatState.state !== 'loaded' || activeChatState.data === null) return;
+		const activeChat = activeChatState.data;
 
-			const chatService = await this._resolveChatService();
-			const activeChat = await this._ensureActiveChat(chatService, revision);
-			if (activeChat === undefined || !this._isCurrentChat(activeChat, revision)) return;
+		const replacement = getLastAssistantMessage(activeChat.messages);
+		if (replacement === undefined) return await this._generateResponse(activeChat);
+		const { message: replaceMessage, index: replaceIndex } = replacement;
 
-			return this._generateAssistantResponse();
+		const revision = ++this._activeChatRevision;
+		await this._generateAndPersist(getMessagesForRequest(activeChat.messages, replaceIndex), {
+			onFirstChunk: () => setDraftMessageAtIndex(activeChat, replaceIndex, replaceMessage.viewId),
+			onPersist: async (generatedMessage) => {
+				const chatService = await this._resolveChatService();
+				return await chatService.replaceMessage(
+					activeChat.chatCatalogId,
+					activeChat.refId,
+					replaceMessage.commitId,
+					toChatMessage(generatedMessage)
+				);
+			},
+			afterPersist: (persistedMessage) => {
+				if (!this._isCurrentChat(activeChat, revision)) return;
+				this._appendPersistedMessage(activeChat, persistedMessage, replaceIndex);
+			},
+			onPersistFailure: (pendingMessage) =>
+				this._restorePendingMessage(activeChat, pendingMessage, replaceMessage)
+		});
+	}
+
+	/** Generates and persists a new assistant response for the loaded active chat.
+	 *
+	 * @returns Resolves after generation and persistence complete, or when no loaded chat is available or generation is already active.
+	 * @throws {AppError|DOMException|import('valibot').ValiError} when generation or persistence fails.
+	 */
+	async generateResponse(): Promise<void> {
+		if (this.generationState !== GenerationState.Idle) return;
+
+		const activeChatState = this._activeChatState;
+		if (activeChatState.state !== 'loaded' || activeChatState.data === null) return;
+
+		const activeChat = activeChatState.data;
+
+		await this._generateResponse(activeChat);
+	}
+
+	/** Generates and persists a new assistant message using append semantics. */
+	private async _generateResponse(activeChat: ActiveChat) {
+		const revision = ++this._activeChatRevision;
+		const pendingIndex = activeChat.messages.length;
+
+		await this._generateAndPersist(getMessagesForRequest(activeChat.messages), {
+			onFirstChunk: () => setDraftMessageAtIndex(activeChat, pendingIndex, `pending:${revision}`),
+			onPersist: async (generatedMessage) => {
+				const chatService = await this._resolveChatService();
+				return await chatService.addMessage(
+					activeChat.chatCatalogId,
+					activeChat.refId,
+					toChatMessage(generatedMessage)
+				);
+			},
+			afterPersist: (persistedMessage) => {
+				if (!this._isCurrentChat(activeChat, revision)) return;
+				this._appendPersistedMessage(activeChat, persistedMessage, pendingIndex);
+			}
+		});
+	}
+
+	/** Coordinates streaming, partial-response persistence, reconciliation, and generation-state cleanup. */
+	private async _generateAndPersist(
+		requestMessages: ChatMessage[],
+		options: {
+			onFirstChunk: () => PendingChatMessageView;
+			onPersist: (generatedMessage: PendingChatMessageView) => Promise<ChatHistoryEntry>;
+			afterPersist: (persistedMessage: ChatHistoryEntry) => void;
+			onPersistFailure?: (pendingMessage: PendingChatMessageView) => void;
 		}
+	) {
+		try {
+			this.generationState = GenerationState.Generating;
+			let generationFailure: unknown = NO_GENERATION_FAILURE;
 
-		const lastMessage = state.data.messages.at(-1);
-		const replaceMessage =
-			lastMessage !== undefined &&
-			lastMessage.commitId !== null &&
-			lastMessage.sender === 'assistant'
-				? lastMessage
-				: undefined;
+			let pendingMessage: PendingChatMessageView | undefined;
+			try {
+				await this._handleGeneration(requestMessages, () => {
+					const message = options.onFirstChunk();
+					pendingMessage = message;
+					return message;
+				});
+			} catch (cause: unknown) {
+				generationFailure = cause;
+			}
 
-		return this._generateAssistantResponse(replaceMessage);
+			if (pendingMessage === undefined) {
+				if (generationFailure !== NO_GENERATION_FAILURE) throw generationFailure;
+				return undefined;
+			}
+
+			let persistedMessage: ChatHistoryEntry;
+			try {
+				persistedMessage = await options.onPersist(pendingMessage);
+			} catch (persistenceFailure: unknown) {
+				if (options.onPersistFailure) {
+					options.onPersistFailure(pendingMessage);
+				}
+				if (generationFailure !== NO_GENERATION_FAILURE) {
+					throw new ChatGenerationAndPersistenceError(generationFailure, persistenceFailure);
+				}
+
+				throw persistenceFailure;
+			}
+
+			options.afterPersist(persistedMessage);
+
+			if (generationFailure !== NO_GENERATION_FAILURE) throw generationFailure;
+		} finally {
+			this.generationState = GenerationState.Idle;
+		}
 	}
 
-	/** Ensures a chat exists, persists a message, and appends its committed history entry. */
-	private async _addMessage(message: ChatMessage): Promise<boolean> {
-		const revision = ++this._activeChatRevision;
-
-		const chatService = await this._resolveChatService();
-		const activeChat = await this._ensureActiveChat(chatService, revision);
-		if (activeChat === undefined || !this._isCurrentChat(activeChat, revision)) return false;
-
-		const entry = await chatService.addMessage(activeChat.chatCatalogId, activeChat.refId, message);
-		if (!this._isCurrentChat(activeChat, revision)) return false;
-
-		activeChat.messages.push(toPersistedMessageView(entry));
-		return true;
-	}
-
-	/** Owns one response's cancellation, streaming, and persistence lifecycle. */
-	private async _generateAssistantResponse(
-		replaceMessage?: PersistedChatMessageView
-	): Promise<void> {
-		if (this.chatState !== ChatState.Idle) return;
-
-		this.chatState = ChatState.Generating;
-		const revision = ++this._activeChatRevision;
-
+	/** Streams response chunks into the transient message and suppresses expected cancellation. */
+	private async _handleGeneration(
+		requestMessages: ChatMessage[],
+		onFirstChunk: () => PendingChatMessageView
+	) {
 		const abortController = new AbortController();
 		this._abortController = abortController;
 
 		try {
-			const activeChatState = this._activeChatState;
-			if (activeChatState.state !== 'loaded' || activeChatState.data === null) return;
-			const activeChat = activeChatState.data;
+			const llmService = await this._resolveLlmService();
 
-			const replaceIndex =
-				replaceMessage === undefined
-					? -1
-					: activeChat.messages.findIndex(
-							(message) => message.commitId === replaceMessage.commitId
-						);
-			if (replaceMessage !== undefined && replaceIndex < 0) return;
+			let pendingMessage: PendingChatMessageView | undefined = undefined;
+			for await (const chunk of llmService.generateResponse(
+				requestMessages,
+				abortController.signal
+			)) {
+				if (chunk.content === undefined || chunk.content === '') continue;
 
-			const requestMessages = activeChat.messages
-				.slice(0, replaceIndex < 0 ? activeChat.messages.length : replaceIndex)
-				.filter(isPersistedMessage)
-				.map(toChatMessage);
-			const pendingDraft: PendingChatMessageView = {
-				sender: 'assistant',
-				content: '',
-				commitId: null,
-				viewId: `pending:${revision}`
-			};
-			const pendingIndex = replaceIndex < 0 ? activeChat.messages.length : replaceIndex;
-			if (replaceIndex < 0) {
-				activeChat.messages.push(pendingDraft);
-			} else {
-				activeChat.messages[pendingIndex] = pendingDraft;
-			}
-			const pendingMessage = activeChat.messages[pendingIndex];
-			if (pendingMessage === undefined || pendingMessage.commitId !== null) return;
-
-			let generationFailure: unknown = NO_GENERATION_FAILURE;
-			try {
-				await this._appendResponseChunks(requestMessages, pendingMessage, abortController.signal);
-			} catch (cause: unknown) {
-				if (!(abortController.signal.aborted && cause instanceof OpenAiAbortError)) {
-					generationFailure = cause;
+				if (!pendingMessage) {
+					pendingMessage = onFirstChunk();
 				}
-			}
 
-			try {
-				await this._persistPendingMessage(activeChat, pendingMessage, revision, replaceMessage);
-			} catch (persistenceFailure: unknown) {
-				if (generationFailure !== NO_GENERATION_FAILURE) {
-					throw new ChatGenerationAndPersistenceError(generationFailure, persistenceFailure);
-				}
-				throw persistenceFailure;
-			}
-
-			if (generationFailure !== NO_GENERATION_FAILURE && revision === this._activeChatRevision) {
-				throw generationFailure;
+				pendingMessage.content += chunk.content;
 			}
 		} catch (cause: unknown) {
-			const expectedCancellation =
-				abortController.signal.aborted && cause instanceof OpenAiAbortError;
-			if (!expectedCancellation && revision === this._activeChatRevision) throw cause;
-		} finally {
-			if (this._abortController === abortController) this._abortController = null;
-			this.chatState = ChatState.Idle;
-		}
-	}
-
-	/** Persists a non-empty response only while its originating chat remains active. */
-	private async _persistPendingMessage(
-		activeChat: ActiveChat,
-		pendingMessage: PendingChatMessageView,
-		revision: number,
-		replaceMessage: PersistedChatMessageView | undefined
-	): Promise<void> {
-		if (!this._isCurrentChat(activeChat, revision) || pendingMessage.content.length === 0) {
-			this._restorePendingMessage(activeChat, pendingMessage, replaceMessage);
-			return;
-		}
-
-		try {
-			const chatService = await this._resolveChatService();
-			if (!this._isCurrentChat(activeChat, revision)) {
-				this._restorePendingMessage(activeChat, pendingMessage, replaceMessage);
-				return;
-			}
-
-			const entry =
-				replaceMessage === undefined
-					? await chatService.addMessage(
-							activeChat.chatCatalogId,
-							activeChat.refId,
-							toChatMessage(pendingMessage)
-						)
-					: await chatService.replaceMessage(
-							activeChat.chatCatalogId,
-							activeChat.refId,
-							replaceMessage.commitId,
-							toChatMessage(pendingMessage)
-						);
-			if (!this._isCurrentChat(activeChat, revision)) return;
-
-			this._reconcilePersistedMessage(activeChat, pendingMessage, entry);
-		} catch (cause: unknown) {
-			if (replaceMessage !== undefined) {
-				this._restorePendingMessage(activeChat, pendingMessage, replaceMessage);
-			}
-			if (revision === this._activeChatRevision) {
+			if (!(abortController.signal.aborted && cause instanceof OpenAiAbortError)) {
 				throw cause;
 			}
+		} finally {
+			if (this._abortController === abortController) this._abortController = null;
 		}
 	}
 
-	/** Replaces the pending message in place with its persisted history entry. */
-	private _reconcilePersistedMessage(
+	/** Persists a message to the supplied chat and returns its committed history entry. */
+	private async _persistMessage(
 		activeChat: ActiveChat,
-		pendingMessage: PendingChatMessageView,
-		entry: ChatHistoryEntry
-	): void {
-		const pendingIndex = activeChat.messages.findIndex(
-			(message) => message.viewId === pendingMessage.viewId
-		);
-		if (pendingIndex >= 0) activeChat.messages[pendingIndex] = toPersistedMessageView(entry);
+		message: ChatMessage
+	): Promise<ChatHistoryEntry> {
+		const chatService = await this._resolveChatService();
+		return await chatService.addMessage(activeChat.chatCatalogId, activeChat.refId, message);
+	}
+
+	/** Appends a committed message or replaces the transient row at the supplied index. */
+	private _appendPersistedMessage(
+		activeChat: ActiveChat,
+		message: ChatHistoryEntry,
+		replaceIndex: number = -1
+	) {
+		const persistedMessage = toPersistedMessageView(message);
+		const replacedMessage = activeChat.messages[replaceIndex];
+		if (replaceIndex >= 0 && replacedMessage !== undefined) {
+			activeChat.messages[replaceIndex] = {
+				...persistedMessage,
+				viewId: replacedMessage.viewId
+			};
+		} else {
+			activeChat.messages.push(persistedMessage);
+		}
 	}
 
 	/** Restores the replaced entry, or removes a new transient message that cannot be saved. */
@@ -430,29 +440,15 @@ export class ChatSession {
 		);
 	}
 
-	/** Streams response chunks into a session-only message proxy. */
-	private async _appendResponseChunks(
-		requestMessages: ChatMessage[],
-		pendingMessage: PendingChatMessageView,
-		abortSignal: AbortSignal
-	): Promise<void> {
-		const llmService = await this._resolveLlmService();
-		for await (const chunk of llmService.generateResponse(requestMessages, abortSignal)) {
-			if (chunk.content === undefined || chunk.content === '') continue;
-			pendingMessage.content += chunk.content;
-		}
-	}
-
 	/** Lazily creates a chat for the first sent message. */
-	private async _ensureActiveChat(
-		chatService: ChatService,
-		revision: number
-	): Promise<ActiveChat | undefined> {
+	private async _ensureActiveChat(revision: number): Promise<ActiveChat | undefined> {
 		if (revision !== this._activeChatRevision) return undefined;
 		const state = this._activeChatState;
 		if (state.state === LoadState.Loading || state.state === LoadState.Error) return undefined;
 		if (state.state === LoadState.Loaded && state.data !== null) return state.data;
 
+		const chatService = await this._resolveChatService();
+		if (revision !== this._activeChatRevision) return undefined;
 		const createdChat = await chatService.createChat();
 		if (revision !== this._activeChatRevision) return undefined;
 
@@ -474,6 +470,48 @@ function toPersistedMessageView(entry: ChatHistoryEntry): PersistedChatMessageVi
 		commitId: entry.commitId,
 		viewId: `commit:${entry.commitId}`
 	};
+}
+
+/** Inserts a transient assistant message at a history index and returns its reactive view. */
+function setDraftMessageAtIndex(
+	activeChat: ActiveChat,
+	index: number,
+	viewId: string
+): PendingChatMessageView {
+	const pendingDraft: PendingChatMessageView = {
+		sender: 'assistant',
+		content: '',
+		commitId: null,
+		viewId: viewId
+	};
+
+	activeChat.messages[index] = pendingDraft;
+	const pendingMessage = activeChat.messages[index];
+	return pendingMessage;
+}
+
+/** Builds the committed history prefix used for an LLM request. */
+function getMessagesForRequest(
+	messageViews: ChatMessageView[],
+	replaceIndex: number = -1
+): ChatMessage[] {
+	return messageViews
+		.slice(0, replaceIndex < 0 ? messageViews.length : replaceIndex)
+		.filter(isPersistedMessage)
+		.map(toChatMessage);
+}
+
+/** Returns the final persisted assistant message and its index when the chat history ends with one. */
+function getLastAssistantMessage(
+	messageViews: ChatMessageView[]
+): { message: PersistedChatMessageView; index: number } | undefined {
+	const index = messageViews.length - 1;
+	const message = messageViews[index];
+
+	if (message === undefined || message.commitId === null || message.sender !== 'assistant')
+		return undefined;
+
+	return { message, index };
 }
 
 /** Removes commit metadata before passing history to the LLM or persistence service. */

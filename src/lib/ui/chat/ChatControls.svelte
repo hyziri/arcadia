@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { CircleStop, Menu, MessageSquarePlus, RotateCcw, Send } from '@lucide/svelte';
 
-	import { ChatState, type ChatStateType } from '#lib/state';
+	import { GenerationState, type GenerationStateType } from '#lib/state';
 
 	interface Props {
 		isLoading: boolean;
-		chatState: ChatStateType;
+		generationState: GenerationStateType;
 		onNewChat: () => void;
 		onSendMessage: (message: string) => Promise<boolean>;
 		onRegenerateMessage: () => void;
@@ -14,7 +14,7 @@
 
 	let {
 		isLoading,
-		chatState,
+		generationState,
 		onNewChat,
 		onSendMessage,
 		onRegenerateMessage,
@@ -32,7 +32,7 @@
 	async function sendMessage(): Promise<void> {
 		const submittedMessage = message;
 		const trimmedMessage = submittedMessage.trim();
-		if (isLoading || chatState === ChatState.Sending || !trimmedMessage) return;
+		if (isLoading || generationState === GenerationState.Sending || !trimmedMessage) return;
 
 		const isPersisted = await onSendMessage(trimmedMessage);
 		if (isPersisted && message === submittedMessage) message = '';
@@ -115,7 +115,7 @@
 				<button
 					class="btn w-full justify-start gap-2 btn-ghost"
 					type="button"
-					disabled={chatState !== ChatState.Idle}
+					disabled={generationState !== GenerationState.Idle}
 					onclick={startNewChat}
 				>
 					<MessageSquarePlus size={18} />
@@ -124,7 +124,7 @@
 				<button
 					class="btn w-full justify-start gap-2 btn-ghost"
 					type="button"
-					disabled={isLoading || chatState !== ChatState.Idle}
+					disabled={isLoading || generationState !== GenerationState.Idle}
 					onclick={regenerateMessage}
 				>
 					<RotateCcw size={18} />
@@ -138,7 +138,7 @@
 		bind:value={message}
 		class="textarea h-10 max-h-[40dvh] min-h-0 w-full resize-none overflow-y-auto"
 		onkeydown={handleKeydown}></textarea>
-	{#if chatState === ChatState.Generating}
+	{#if generationState === GenerationState.Generating}
 		<button
 			class="btn btn-square btn-ghost"
 			type="button"
@@ -152,7 +152,7 @@
 			class="btn btn-square btn-ghost"
 			type="button"
 			aria-label="Send message"
-			disabled={isLoading || chatState === ChatState.Sending}
+			disabled={isLoading || generationState === GenerationState.Sending}
 			onclick={sendMessage}
 		>
 			<Send size={24} />
